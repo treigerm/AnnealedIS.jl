@@ -1,20 +1,18 @@
 module AnnealedIS
 
-using AbstractMCMC
 using Distributions
 using AdvancedMH
+using LinearAlgebra: I
 
 # Exports
-export AnnealedISSampler
-
-# Reexports
-export sample, MCMCThreads, MCMCDistributed
+export AnnealedISSampler, ais_sample
 
 # TODO: Clean up types for prior and joint
 # TODO: Clean up use of logpdf and logjoint
 # TODO: Make it possible to parallelize sampling
+# TODO: Better way to specify transition kernels
 
-struct AnnealedISSampler <: AbstractMCMC.AbstractSampler
+struct AnnealedISSampler
     prior::Distributions.Distribution
     joint::AdvancedMH.DensityModel
     betas
@@ -32,7 +30,7 @@ end
 One importance sample with associated weight.
 """
 struct WeightedSample 
-    weight
+    log_weight
     params
 end
 
@@ -48,7 +46,7 @@ function weight(samples, sampler::AnnealedISSampler)
         logdensity(sampler, i-1, samples[i])
     end
     denominator += logpdf(sampler.prior, samples[1])
-    return numerator / denominator
+    return numerator - denominator
 end
 
 """
@@ -67,15 +65,21 @@ Sample from the ith transition kernel.
 function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
     # The base distribution does not have a transition kernel associated with it.
     @assert i > 1
+    
+    density(params) = logdensity(sampler, i, params)
+    model = DensityModel(density)
 
-    kernel = sampler.transition_kernels[i-1]
-    return rand(rng, kernel(x))
+    # Do five steps of Metropolis-Hastings
+    spl = RWMH(MvNormal(size(x, 1), 0.1125))
+    samples = sample(model, spl, 5; progress=false)
+
+    return samples[5].params
 end
 
 """
 First MC step.
 """
-function AbstractMCMC.step(rng, model, sampler::AnnealedISSampler)
+function single_sample(rng, sampler::AnnealedISSampler)
     # TODO: Do I even need the model?
     N = length(sampler.betas)
 
@@ -92,14 +96,20 @@ function AbstractMCMC.step(rng, model, sampler::AnnealedISSampler)
     # Get weight of current samples
     w = weight(samples, sampler)
     ws = WeightedSample(w, samples[end])
-    return ws, ws
+    return ws
 end
 
-"""
-Importance Sampling does not depend on value of previous state.
-"""
-function AbstractMCMC.step(rng, model, sampler, state)
-    return AbstractMCMC.step(rng, model, sampler)
+function ais_sample(rng, sampler, num_samples)
+    first_sample = single_sample(rng, sampler)
+    samples = Array{typeof(first_sample)}(undef, num_samples) # TODO: Is this best practice?
+    samples[1] = first_sample
+
+    # TODO: Parallelize the loop.
+    for i = 2:num_samples
+        samples[i] = single_sample(rng, sampler)
+    end
+
+    return samples
 end
 
 end

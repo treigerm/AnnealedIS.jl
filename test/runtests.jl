@@ -1,10 +1,13 @@
 using AnnealedIS
 using Distributions
 using AdvancedMH
+using LinearAlgebra: I
 using Test
 using Random
 
 @testset "AnnealedIS.jl" begin
+    # TODO: Some basic test on a problem with known solution so we know algorithm does 
+    #       something reasonable.
     rng = MersenneTwister(42)
 
     @testset "AnnealedISSampler" begin
@@ -24,20 +27,5 @@ using Random
 
         samples = [rand(rng, ais.prior) for _ in 1:N]
         weight = AnnealedIS.weight(samples, ais)
-    end
-
-    @testset "AbstractMCMC Integration" begin
-        D = 5
-        N = 3
-
-        prior = MvNormal(D, 1.0)
-        density(params) = logpdf(MvNormal(D, 1.0), params)
-        joint = DensityModel(density)
-
-        ais = AnnealedISSampler(prior, joint, N)
-
-        samples = sample(rng, joint, ais, 10)
-
-        @show samples
     end
 end
