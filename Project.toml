@@ -9,6 +9,7 @@ AdvancedMH = "5b7e9947-ddc0-4b3f-9b55-0d8042f74170"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 
 [compat]
+AbstractMCMC = "2.0"
 julia = "1"
 
 [extras]
