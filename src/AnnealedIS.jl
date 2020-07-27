@@ -20,7 +20,7 @@ struct AnnealedISSampler
 end
 
 function AnnealedISSampler(prior, joint, N::Int)
-    betas = collect(range(0, 1, length=N))
+    betas = collect(range(0, 1, length=N+1))
     kernel = x -> MvNormal(x) # TODO: Better generic kernel which can handle different types.
     transition_kernels = fill(kernel, N-1)
     return AnnealedISSampler(prior, joint, betas, transition_kernels)
@@ -29,24 +29,10 @@ end
 """
 One importance sample with associated weight.
 """
+# TODO: Type annotations for better performance.
 struct WeightedSample 
     log_weight
     params
-end
-
-"""
-Return the importance weight for this sample.
-"""
-function weight(samples, sampler::AnnealedISSampler)
-    N = length(sampler.betas)
-    numerator = sum(1:N) do i
-        logdensity(sampler, i, samples[i])
-    end
-    denominator = sum(2:N) do i
-        logdensity(sampler, i-1, samples[i])
-    end
-    denominator += logpdf(sampler.prior, samples[1])
-    return numerator - denominator
 end
 
 """
@@ -63,15 +49,17 @@ end
 Sample from the ith transition kernel.
 """
 function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
-    # The base distribution does not have a transition kernel associated with it.
+    # The base and target distribution do not have a transition kernel.
     @assert i > 1
+    @assert i-1 <= length(sampler.transition_kernels)
     
     density(params) = logdensity(sampler, i, params)
     model = DensityModel(density)
 
     # Do five steps of Metropolis-Hastings
-    spl = RWMH(MvNormal(size(x, 1), 0.1125))
-    samples = sample(model, spl, 5; progress=false)
+    spl = RWMH(MvNormal(size(x, 1), 1))
+    # TODO: Set x as the initial state.
+    samples = sample(model, spl, 5; progress=false, init_params=x)
 
     return samples[5].params
 end
@@ -80,22 +68,17 @@ end
 First MC step.
 """
 function single_sample(rng, sampler::AnnealedISSampler)
-    # TODO: Do I even need the model?
     N = length(sampler.betas)
+    num_samples = N-1
 
-    # TODO: Handle multidimensional samples and different types
-    prior_sample = rand(rng, sampler.prior) 
-    samples = Array{typeof(prior_sample)}(undef, N)
-
-    # Sample from base distribution
-    samples[1] = prior_sample
-    # Sample from annealed distributions
-    for i in 2:N
-        samples[i] = transition_kernel(rng, sampler, i, samples[i-1])
+    sample = rand(rng, sampler.prior)
+    log_weight = logdensity(sampler, 2, sample) - logdensity(sampler, 1, sample)
+    for i in 2:num_samples
+        sample = transition_kernel(rng, sampler, i, sample)
+        log_weight += logdensity(sampler, i+1, sample) - logdensity(sampler, i, sample)
     end
-    # Get weight of current samples
-    w = weight(samples, sampler)
-    ws = WeightedSample(w, samples[end])
+
+    ws = WeightedSample(log_weight, sample)
     return ws
 end
 
