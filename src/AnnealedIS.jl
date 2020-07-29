@@ -41,20 +41,12 @@ function AnnealedISSampler(prior_sampling, prior_density, joint_density, N::Int)
     )
 end
 
-function AnnealedISSampler(model, N::Int)
-    betas = collect(range(0, 1, length=N+1))
-    
-    prior_sampling(rng) = sample_from_prior(rng, model)
-    prior_sample = prior_sampling(Random.GLOBAL_RNG)
-    kernel = get_normal_transition_kernel(prior_sample)
-    transition_kernels = fill(kernel, N-1)
-
+function AnnealedISSampler(model::Turing.Model, N::Int)
     return AnnealedISSampler(
-        prior_sampling,
+        rng -> sample_from_prior(rng, model),
         make_log_prior_density(model),
         make_log_joint_density(model),
-        betas,
-        transition_kernels
+        N
     )
 end
 
@@ -173,6 +165,8 @@ function sample_from_prior(rng, model)
     vi = Turing.VarInfo(model) 
     model(vi)
 
+    # Extract a NamedTuple from VarInfo which has variable names as keys and 
+    # the sampled values as values.
     # TODO: Check that vi is TypedVarInfo
     vns = Turing.DynamicPPL._getvns(vi, Turing.SampleFromPrior())
     vt = _val_tuple(vi, vns)
