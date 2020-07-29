@@ -1,17 +1,23 @@
 module AnnealedIS
 
+using Turing
 using Distributions
 using AdvancedMH
 using LinearAlgebra: I
 
 # Exports
-export AnnealedISSampler, ais_sample
+export AnnealedISSampler, 
+    ais_sample, 
+    sample_from_prior, 
+    make_log_prior_density, 
+    make_log_joint_density
 
+# TODO: Better way to specify transition kernels
 # TODO: Clean up types for prior and joint
 # TODO: Clean up use of logpdf and logjoint
 # TODO: Make it possible to parallelize sampling
-# TODO: Better way to specify transition kernels
 
+# TODO: Change to take three functions: sample from prior, evaluate prior density, evaluate joint density.
 struct AnnealedISSampler
     prior::Distributions.Distribution
     joint::AdvancedMH.DensityModel
@@ -57,11 +63,13 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
     model = DensityModel(density)
 
     # Do five steps of Metropolis-Hastings
+    # TODO: Possible use an iterator approach from AbstractMCMC to avoid saving 
+    # unused samples.
+    # TODO: Adjust proposal for when x is a NamedTuple
     spl = RWMH(MvNormal(size(x, 1), 1))
-    # TODO: Set x as the initial state.
     samples = sample(model, spl, 5; progress=false, init_params=x)
 
-    return samples[5].params
+    return samples[end].params
 end
 
 """
@@ -93,6 +101,99 @@ function ais_sample(rng, sampler, num_samples)
     end
 
     return samples
+end
+
+function estimate_expectation(samples::Array{WeightedSample}, f)
+    weighted_sum = sum(samples) do weighted_sample
+        exp(weighted_sample.log_weight) * f(weighted_sample.params)
+    end
+    sum_weights = sum(samples) do weighted_sample
+        exp(weighted_sample.log_weight)
+    end
+    return weighted_sum / sum_weights
+end
+
+##############################
+# Turing Interop
+##############################
+
+# Code from https://github.com/TuringLang/Turing.jl/blob/master/src/inference/mh.jl
+function set_namedtuple!(vi::Turing.VarInfo, nt::NamedTuple)
+    for (n, vals) in pairs(nt)
+        vns = vi.metadata[n].vns
+        nvns = length(vns)
+
+        # if there is a single variable only
+        if nvns == 1
+            # assign the unpacked values
+            if length(vals) == 1
+                vi[vns[1]] = [vals[1];]
+            # otherwise just assign the values
+            else
+                vi[vns[1]] = [vals;]
+            end
+        # if there are multiple variables
+        elseif vals isa AbstractArray
+            nvals = length(vals)
+            # if values are provided as an array with a single element
+            if nvals == 1
+                # iterate over variables and unpacked values
+                for (vn, val) in zip(vns, vals[1])
+                    vi[vn] = [val;]
+                end
+            # otherwise number of variables and number of values have to be equal
+            elseif nvals == nvns
+                # iterate over variables and values
+                for (vn, val) in zip(vns, vals)
+                    vi[vn] = [val;]
+                end
+            else
+                error("Cannot assign `NamedTuple` to `VarInfo`")
+            end
+        else
+            error("Cannot assign `NamedTuple` to `VarInfo`")
+        end
+    end
+end
+
+function sample_from_prior(rng, model)
+    # TODO: Need to make use of rng.
+    # TODO: Need some default VarInfo because this always runs the model once
+    #   to get a TypedVarInfo.
+    vi = Turing.VarInfo(model) 
+    model(vi)
+    # TODO: Check that vi is TypedVarInfo
+
+    names = []
+    vals = []
+    for (name, metadata) in pairs(vi.metadata)
+        push!(names, name)
+        # TODO: This only works for univariate variables
+        push!(vals, metadata.vals[1])
+    end
+
+    return (;zip(names, vals)...)
+end
+
+"""
+Returns a function which is the prior density.
+"""
+function make_log_prior_density(model)
+    return function logprior_density(named_tuple)
+        vi = Turing.VarInfo(model)
+        set_namedtuple!(vi, named_tuple)
+        model(vi, Turing.SampleFromPrior(), Turing.PriorContext())
+        return Turing.getlogp(vi)
+    end
+end
+
+function make_log_joint_density(model)
+    return function logjoint_density(named_tuple)
+        vi = Turing.VarInfo(model)
+        set_namedtuple!(vi, named_tuple)
+        model(vi)
+        return Turing.getlogp(vi)
+    end
 end
 
 end

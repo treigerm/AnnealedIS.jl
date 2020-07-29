@@ -1,14 +1,17 @@
-using AnnealedIS
+using Turing
 using Distributions
 using AdvancedMH
 using LinearAlgebra: I
-using Test
 using Random
+using Test
+
+using AnnealedIS
 
 @testset "AnnealedIS.jl" begin
     # TODO: Some basic test on a problem with known solution so we know algorithm does 
     #       something reasonable.
     rng = MersenneTwister(42)
+    Random.seed!(42)
 
     @testset "AnnealedISSampler" begin
         D = 5
@@ -46,17 +49,66 @@ using Random
         ais = AnnealedISSampler(prior, joint, N)
 
         samples = ais_sample(rng, ais, num_samples)
-        post_mean = sum(samples) do weighted_sample
-            exp(weighted_sample.log_weight) * weighted_sample.params
-        end
-        post_mean_denominator = sum(samples) do weighted_sample
-            exp(weighted_sample.log_weight)
+
+        posterior_mean = AnnealedIS.estimate_expectation(samples, x -> x)
+        @test isapprox(posterior_mean, [1.5]; atol=1e-2)
+    end
+
+    @testset "Sample from Turing" begin
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(y, 1)
         end
 
-        standard_mean = sum(samples) do weighted_sample
-            weighted_sample.params
+        y_obs = 2
+        tm = test_model(y_obs)
+
+        named_tuple = sample_from_prior(rng, tm)
+        @test typeof(named_tuple[:x]) == Float64
+
+        # Test model with multiple latents and multivariate latent.
+        D = 5
+        @model function test_model2(y)
+            a ~ Normal(0, 1)
+            x ~ MvNormal(D, 1.0)
+            y ~ MvNormal(x, I)
         end
 
-        @show post_mean / post_mean_denominator
+        y_obs = ones(D)
+        tm2 = test_model2(y_obs)
+
+        named_tuple = sample_from_prior(rng, tm2)
+        @test typeof(named_tuple[:a]) == Float64
+        @test_broken typeof(named_tuple[:x]) == typeof(rand(MvNormal(D, 1.0)))
+    end
+
+    @testset "Prior density from Turing" begin
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(x, 1)
+        end
+
+        y_obs = 2
+        tm = test_model(y_obs)
+        logprior_density = make_log_prior_density(tm)
+
+        xval = 1
+        nt = (x = xval,)
+        @test logprior_density(nt) == logpdf(Normal(0, 1), xval)
+    end
+
+    @testset "Joint density from Turing" begin
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(x, 1)
+        end
+
+        y_obs = 2
+        tm = test_model(y_obs)
+        logjoint_density = make_log_joint_density(tm)
+
+        xval = 1
+        nt = (x = xval,)
+        @test logjoint_density(nt) == logpdf(Normal(0, 1), xval) + logpdf(Normal(xval, 1), y_obs)
     end
 end
