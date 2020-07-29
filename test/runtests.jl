@@ -17,22 +17,23 @@ using AnnealedIS
         D = 5
         N = 2
 
-        prior = MvNormal(D, 1.0)
-        density(params) = logpdf(MvNormal(D, 0.5), params)
-        joint = DensityModel(density)
+        prior_sampling(rng) = rand(rng, MvNormal(D, 1.0))
+        prior_density(params) = logpdf(MvNormal(D, 1.0), params)
+        joint_density(params) = logpdf(MvNormal(D, 0.5), params)
 
-        ais = AnnealedISSampler(prior, joint, N)
+        ais = AnnealedISSampler(
+            prior_sampling, prior_density, joint_density, N)
 
         @test ais.betas == [0.0, 0.5, 1.0]
-        x = rand(rng, ais.prior)
-        y = rand(rng, ais.transition_kernels[1](x))
+        x = ais.prior_sampling(rng)
+        y = rand(rng, ais.transition_kernels[1])
         @test typeof(x) == typeof(y)
 
-        samples = [rand(rng, ais.prior) for _ in 1:N]
+        samples = [ais.prior_sampling(rng) for _ in 1:N]
 
-        @test AnnealedIS.logdensity(ais, 1, samples[1]) == logpdf(prior, samples[1])
-        @test AnnealedIS.logdensity(ais, 3, samples[1]) == density(samples[1])
-        @test AnnealedIS.logdensity(ais, 2, samples[1]) == (0.5*logpdf(prior, samples[1]) + 0.5*density(samples[1]))
+        @test AnnealedIS.logdensity(ais, 1, samples[1]) == prior_density(samples[1])
+        @test AnnealedIS.logdensity(ais, 3, samples[1]) == joint_density(samples[1])
+        @test AnnealedIS.logdensity(ais, 2, samples[1]) == (0.5*prior_density(samples[1]) + 0.5*joint_density(samples[1]))
     end
 
     @testset "Convergence test" begin
@@ -42,11 +43,12 @@ using AnnealedIS
 
         y_obs = [3.0]
 
-        prior = MvNormal(D, 1.0)
-        density(params) = logpdf(MvNormal(params, I), y_obs) + logpdf(prior, params)
-        joint = DensityModel(density)
+        prior_sampling(rng) = rand(rng, MvNormal(D, 1.0))
+        prior_density(params) = logpdf(MvNormal(D, 1.0), params)
+        joint_density(params) = logpdf(MvNormal(params, I), y_obs) + prior_density(params)
 
-        ais = AnnealedISSampler(prior, joint, N)
+        ais = AnnealedISSampler(
+            prior_sampling, prior_density, joint_density, N)
 
         samples = ais_sample(rng, ais, num_samples)
 
@@ -95,6 +97,10 @@ using AnnealedIS
         xval = 1
         nt = (x = xval,)
         @test logprior_density(nt) == logpdf(Normal(0, 1), xval)
+
+        # Test that we can evaluate samples from prior
+        nt = sample_from_prior(rng, tm)
+        @test logprior_density(nt) == logpdf(Normal(0, 1), nt[:x])
     end
 
     @testset "Joint density from Turing" begin
@@ -110,5 +116,28 @@ using AnnealedIS
         xval = 1
         nt = (x = xval,)
         @test logjoint_density(nt) == logpdf(Normal(0, 1), xval) + logpdf(Normal(xval, 1), y_obs)
+    end
+
+    @testset "Turing AnnealedISSampler" begin
+        N = 3
+        num_samples = 10
+
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(x, 1)
+        end
+
+        y_obs = 2
+        tm = test_model(y_obs)
+
+        ais = AnnealedISSampler(tm, N)
+        samples = ais_sample(rng, ais, num_samples)
+    end
+
+    @testset "Transition kernels" begin
+        prior_sample = (a = 0.0, b = [1; 2])
+        expected_transition_kernel = (a = Normal(0, 1), b = MvNormal(2, 1.0))
+        transition_kernel = AnnealedIS.get_normal_transition_kernel(prior_sample)
+        @test expected_transition_kernel == transition_kernel
     end
 end

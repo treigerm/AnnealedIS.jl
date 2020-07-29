@@ -4,6 +4,7 @@ using Turing
 using Distributions
 using AdvancedMH
 using LinearAlgebra: I
+using Random
 
 # Exports
 export AnnealedISSampler, 
@@ -13,8 +14,6 @@ export AnnealedISSampler,
     make_log_joint_density
 
 # TODO: Better way to specify transition kernels
-# TODO: Clean up types for prior and joint
-# TODO: Clean up use of logpdf and logjoint
 # TODO: Make it possible to parallelize sampling
 
 # TODO: Add types.
@@ -28,13 +27,34 @@ end
 
 function AnnealedISSampler(prior_sampling, prior_density, joint_density, N::Int)
     betas = collect(range(0, 1, length=N+1))
-    kernel = x -> MvNormal(x) # TODO: Better generic kernel which can handle different types.
+
+    prior_sample = prior_sampling(Random.GLOBAL_RNG)
+    kernel = get_normal_transition_kernel(prior_sample)
     transition_kernels = fill(kernel, N-1)
+
     return AnnealedISSampler(
         prior_sampling,
         prior_density, 
         joint_density, 
         betas, 
+        transition_kernels
+    )
+end
+
+function AnnealedISSampler(model, N::Int)
+    betas = collect(range(0, 1, length=N+1))
+    
+    prior_sampling(rng) = sample_from_prior(rng, model)
+    prior_sample = prior_sampling(Random.GLOBAL_RNG)
+    kernel = get_normal_transition_kernel(prior_sample)
+    @show kernel
+    transition_kernels = fill(kernel, N-1)
+
+    return AnnealedISSampler(
+        prior_sampling,
+        make_log_prior_density(model),
+        make_log_joint_density(model),
+        betas,
         transition_kernels
     )
 end
@@ -72,8 +92,7 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
     # Do five steps of Metropolis-Hastings
     # TODO: Possible use an iterator approach from AbstractMCMC to avoid saving 
     # unused samples.
-    # TODO: Adjust proposal for when x is a NamedTuple
-    spl = RWMH(MvNormal(size(x, 1), 1))
+    spl = RWMH(sampler.transition_kernels[i-1])
     samples = sample(model, spl, 5; progress=false, init_params=x)
 
     return samples[end].params
@@ -119,6 +138,30 @@ function estimate_expectation(samples::Array{WeightedSample}, f)
     end
     return weighted_sum / sum_weights
 end
+
+
+##############################
+# Transition kernels
+##############################
+
+# TODO: How to tune the standard deviation?
+
+# TODO: Is this an appropriate type annotation?
+function get_normal_transition_kernel(prior_sample::T) where {T<:Real}
+    return Normal(0, 1) 
+end
+
+function get_normal_transition_kernel(prior_sample::AbstractArray)
+    return MvNormal(size(prior_sample, 1), 1) 
+end
+
+function get_normal_transition_kernel(prior_sample::NamedTuple)
+    return map(get_normal_transition_kernel, prior_sample)
+end
+
+# TODO: Possibly add this to AdvancedMH.jl
+RWMH(nt::NamedTuple) = MetropolisHastings(map(x -> RandomWalkProposal(x), nt))
+
 
 ##############################
 # Turing Interop
