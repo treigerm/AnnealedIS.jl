@@ -8,8 +8,6 @@ using Test
 using AnnealedIS
 
 @testset "AnnealedIS.jl" begin
-    # TODO: Some basic test on a problem with known solution so we know algorithm does 
-    #       something reasonable.
     rng = MersenneTwister(42)
     Random.seed!(42)
 
@@ -85,7 +83,10 @@ using AnnealedIS
     end
 
     @testset "Prior density from Turing" begin
+        D = 5
+
         @model function test_model(y)
+            a ~ MvNormal(D, 1)
             x ~ Normal(0, 1)
             y ~ Normal(x, 1)
         end
@@ -95,12 +96,14 @@ using AnnealedIS
         logprior_density = make_log_prior_density(tm)
 
         xval = 1
-        nt = (x = xval,)
-        @test logprior_density(nt) == logpdf(Normal(0, 1), xval)
+        aval = ones(D)
+        nt = (x = xval, a = aval)
+        prior_hand(nt) = logpdf(Normal(0, 1), nt[:x]) + logpdf(MvNormal(D, 1), nt[:a])
+        @test logprior_density(nt) == prior_hand(nt)
 
         # Test that we can evaluate samples from prior
         nt = sample_from_prior(rng, tm)
-        @test logprior_density(nt) == logpdf(Normal(0, 1), nt[:x])
+        @test logprior_density(nt) == prior_hand(nt)
     end
 
     @testset "Joint density from Turing" begin
