@@ -17,19 +17,26 @@ export AnnealedISSampler,
 # TODO: Clean up use of logpdf and logjoint
 # TODO: Make it possible to parallelize sampling
 
-# TODO: Change to take three functions: sample from prior, evaluate prior density, evaluate joint density.
+# TODO: Add types.
 struct AnnealedISSampler
-    prior::Distributions.Distribution
-    joint::AdvancedMH.DensityModel
+    prior_sampling::Function
+    prior_density::Function
+    joint_density::Function
     betas
     transition_kernels
 end
 
-function AnnealedISSampler(prior, joint, N::Int)
+function AnnealedISSampler(prior_sampling, prior_density, joint_density, N::Int)
     betas = collect(range(0, 1, length=N+1))
     kernel = x -> MvNormal(x) # TODO: Better generic kernel which can handle different types.
     transition_kernels = fill(kernel, N-1)
-    return AnnealedISSampler(prior, joint, betas, transition_kernels)
+    return AnnealedISSampler(
+        prior_sampling,
+        prior_density, 
+        joint_density, 
+        betas, 
+        transition_kernels
+    )
 end
 
 """
@@ -45,8 +52,8 @@ end
 Get the log density of the ith annealed distribution.
 """
 function logdensity(sampler::AnnealedISSampler, i, x)
-    prior_density = logpdf(sampler.prior, x)
-    joint_density = AdvancedMH.logdensity(sampler.joint, x)
+    prior_density = sampler.prior_density(x)
+    joint_density = sampler.joint_density(x)
     beta = sampler.betas[i]
     return (1-beta) * prior_density + beta * joint_density
 end
@@ -79,7 +86,7 @@ function single_sample(rng, sampler::AnnealedISSampler)
     N = length(sampler.betas)
     num_samples = N-1
 
-    sample = rand(rng, sampler.prior)
+    sample = sampler.prior_sampling(rng)
     log_weight = logdensity(sampler, 2, sample) - logdensity(sampler, 1, sample)
     for i in 2:num_samples
         sample = transition_kernel(rng, sampler, i, sample)
