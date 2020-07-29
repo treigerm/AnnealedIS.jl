@@ -81,7 +81,7 @@ using AnnealedIS
 
         named_tuple = sample_from_prior(rng, tm2)
         @test typeof(named_tuple[:a]) == Float64
-        @test_broken typeof(named_tuple[:x]) == typeof(rand(MvNormal(D, 1.0)))
+        @test typeof(named_tuple[:x]) == typeof(rand(MvNormal(D, 1.0)))
     end
 
     @testset "Prior density from Turing" begin

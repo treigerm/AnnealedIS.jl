@@ -47,7 +47,6 @@ function AnnealedISSampler(model, N::Int)
     prior_sampling(rng) = sample_from_prior(rng, model)
     prior_sample = prior_sampling(Random.GLOBAL_RNG)
     kernel = get_normal_transition_kernel(prior_sample)
-    @show kernel
     transition_kernels = fill(kernel, N-1)
 
     return AnnealedISSampler(
@@ -167,6 +166,44 @@ RWMH(nt::NamedTuple) = MetropolisHastings(map(x -> RandomWalkProposal(x), nt))
 # Turing Interop
 ##############################
 
+function sample_from_prior(rng, model)
+    # TODO: Need to make use of rng.
+    # TODO: Need some default VarInfo because this always runs the model once
+    #   to get a TypedVarInfo.
+    vi = Turing.VarInfo(model) 
+    model(vi)
+
+    # TODO: Check that vi is TypedVarInfo
+    vns = Turing.DynamicPPL._getvns(vi, Turing.SampleFromPrior())
+    vt = _val_tuple(vi, vns)
+    return vt
+end
+
+"""
+Returns a function which is the prior density.
+"""
+function make_log_prior_density(model)
+    return function logprior_density(named_tuple)
+        vi = Turing.VarInfo(model)
+        set_namedtuple!(vi, named_tuple)
+        model(vi, Turing.SampleFromPrior(), Turing.PriorContext())
+        return Turing.getlogp(vi)
+    end
+end
+
+function make_log_joint_density(model)
+    return function logjoint_density(named_tuple)
+        vi = Turing.VarInfo(model)
+        set_namedtuple!(vi, named_tuple)
+        model(vi)
+        return Turing.getlogp(vi)
+    end
+end
+
+##############################
+# Functions from https://github.com/TuringLang/Turing.jl/blob/master/src/inference/mh.jl
+##############################
+
 # Code from https://github.com/TuringLang/Turing.jl/blob/master/src/inference/mh.jl
 function set_namedtuple!(vi::Turing.VarInfo, nt::NamedTuple)
     for (n, vals) in pairs(nt)
@@ -206,44 +243,42 @@ function set_namedtuple!(vi::Turing.VarInfo, nt::NamedTuple)
     end
 end
 
-function sample_from_prior(rng, model)
-    # TODO: Need to make use of rng.
-    # TODO: Need some default VarInfo because this always runs the model once
-    #   to get a TypedVarInfo.
-    vi = Turing.VarInfo(model) 
-    model(vi)
-    # TODO: Check that vi is TypedVarInfo
+# unpack a vector if possible
+unvectorize(dists::AbstractVector) = length(dists) == 1 ? first(dists) : dists
 
-    names = []
-    vals = []
-    for (name, metadata) in pairs(vi.metadata)
-        push!(names, name)
-        # TODO: This only works for univariate variables
-        push!(vals, metadata.vals[1])
-    end
-
-    return (;zip(names, vals)...)
+# possibly unpack and reshape samples according to the prior distribution 
+reconstruct(dist::Distribution, val::AbstractVector) = Turing.DynamicPPL.reconstruct(dist, val)
+function reconstruct(
+    dist::AbstractVector{<:UnivariateDistribution},
+    val::AbstractVector
+)
+    return val
 end
-
-"""
-Returns a function which is the prior density.
-"""
-function make_log_prior_density(model)
-    return function logprior_density(named_tuple)
-        vi = Turing.VarInfo(model)
-        set_namedtuple!(vi, named_tuple)
-        model(vi, Turing.SampleFromPrior(), Turing.PriorContext())
-        return Turing.getlogp(vi)
+function reconstruct(
+    dist::AbstractVector{<:MultivariateDistribution},
+    val::AbstractVector
+)
+    offset = 0
+    return map(dist) do d
+        n = length(d)
+        newoffset = offset + n
+        v = val[(offset + 1):newoffset]
+        offset = newoffset
+        return v
     end
 end
 
-function make_log_joint_density(model)
-    return function logjoint_density(named_tuple)
-        vi = Turing.VarInfo(model)
-        set_namedtuple!(vi, named_tuple)
-        model(vi)
-        return Turing.getlogp(vi)
-    end
+@generated function _val_tuple(
+    vi::Turing.VarInfo,
+    vns::NamedTuple{names}
+) where {names}
+    isempty(names) === 0 && return :(NamedTuple())
+    expr = Expr(:tuple)
+    expr.args = Any[
+        :($name = reconstruct(unvectorize(Turing.DynamicPPL.getdist.(Ref(vi), vns.$name)),
+                              Turing.DynamicPPL.getval(vi, vns.$name)))
+        for name in names]
+    return expr
 end
 
 end
