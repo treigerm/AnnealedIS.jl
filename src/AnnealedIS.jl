@@ -91,7 +91,7 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
     # Do five steps of Metropolis-Hastings
     # TODO: Possible use an iterator approach from AbstractMCMC to avoid saving 
     # unused samples.
-    spl = RWMH(sampler.transition_kernels[i-1])
+    spl = AdvancedMH.RWMH(sampler.transition_kernels[i-1])
     samples = sample(model, spl, 5; progress=false, init_params=x)
 
     return samples[end].params
@@ -110,7 +110,6 @@ function single_sample(rng, sampler::AnnealedISSampler)
     log_weight = logdensity(sampler, 2, sample) - logdensity(sampler, 1, sample)
     if log_weight == -Inf
         # We have an out of distribution sample.
-        # TODO: Should this even happen if you have a proper prior+likelihood
         return WeightedSample(log_weight, sample)
     end
 
@@ -167,7 +166,7 @@ function get_normal_transition_kernel(prior_sample::NamedTuple)
 end
 
 # TODO: Possibly add this to AdvancedMH.jl
-RWMH(nt::NamedTuple) = MetropolisHastings(map(x -> RandomWalkProposal(x), nt))
+AdvancedMH.RWMH(nt::NamedTuple) = MetropolisHastings(map(x -> RandomWalkProposal(x), nt))
 
 
 ##############################
