@@ -13,8 +13,7 @@ export AnnealedISSampler,
     make_log_prior_density, 
     make_log_joint_density
 
-# TODO: Better way to specify transition kernels
-# TODO: Make it possible to parallelize sampling
+# TODO: Make it possible to parallelize sampling; difficulty is thread-safe random number generation.
 
 # TODO: Add types.
 struct AnnealedISSampler
@@ -66,7 +65,16 @@ function logdensity(sampler::AnnealedISSampler, i, x)
     prior_density = sampler.prior_density(x)
     joint_density = sampler.joint_density(x)
     beta = sampler.betas[i]
-    return (1-beta) * prior_density + beta * joint_density
+
+    # NOTE: if beta == 0 and joint_density == -Inf then we get NaN. That's why 
+    # we handle the special cases explicitly.
+    if beta == 0.0
+        return prior_density
+    elseif beta == 1.0
+        return joint_density
+    else
+        return (1-beta) * prior_density + beta * joint_density
+    end
 end
 
 """
@@ -97,7 +105,15 @@ function single_sample(rng, sampler::AnnealedISSampler)
     num_samples = N-1
 
     sample = sampler.prior_sampling(rng)
+    # TODO: Assert that logdensity(sampler, 1, sample) is not -Inf because 
+    # then our prior sampling or our density is wrong.
     log_weight = logdensity(sampler, 2, sample) - logdensity(sampler, 1, sample)
+    if log_weight == -Inf
+        # We have an out of distribution sample.
+        # TODO: Should this even happen if you have a proper prior+likelihood
+        return WeightedSample(log_weight, sample)
+    end
+
     for i in 2:num_samples
         sample = transition_kernel(rng, sampler, i, sample)
         log_weight += logdensity(sampler, i+1, sample) - logdensity(sampler, i, sample)
