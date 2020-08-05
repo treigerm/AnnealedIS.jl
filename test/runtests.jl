@@ -57,6 +57,10 @@ using AnnealedIS
 
         posterior_mean = AnnealedIS.estimate_expectation(samples, x -> x)
         @test isapprox(posterior_mean, [1.5]; atol=1e-2)
+
+        ess = effective_sample_size(samples)
+        # TODO: What is a reasonable ESS to expect?
+        @test ess > 900
     end
 
     @testset "Sample from Turing" begin
@@ -147,7 +151,7 @@ using AnnealedIS
     @testset "Transition kernels" begin
         prior_sample = (a = 0.0, b = [1; 2])
         expected_transition_kernel = (a = Normal(0, 1), b = MvNormal(2, 1.0))
-        transition_kernel = AnnealedIS.get_normal_transition_kernel(prior_sample)
+        transition_kernel = AnnealedIS.get_normal_transition_kernel(prior_sample, 1)
         @test expected_transition_kernel == transition_kernel
     end
 end

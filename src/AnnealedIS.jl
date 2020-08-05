@@ -4,6 +4,7 @@ using Turing
 using Distributions
 using AdvancedMH
 using LinearAlgebra: I
+using StatsFuns: logsumexp
 using Random
 
 # Exports
@@ -11,7 +12,8 @@ export AnnealedISSampler,
     ais_sample, 
     sample_from_prior, 
     make_log_prior_density, 
-    make_log_joint_density
+    make_log_joint_density,
+    effective_sample_size
 
 # TODO: Make it possible to parallelize sampling; difficulty is thread-safe random number generation.
 
@@ -24,12 +26,17 @@ struct AnnealedISSampler
     transition_kernels
 end
 
-function AnnealedISSampler(prior_sampling, prior_density, joint_density, N::Int)
+function AnnealedISSampler(
+    prior_sampling::Function, 
+    prior_density::Function, 
+    joint_density::Function, 
+    transition_kernel_fn::Function, 
+    N::Int
+)
     betas = collect(range(0, 1, length=N+1))
 
     prior_sample = prior_sampling(Random.GLOBAL_RNG)
-    kernel = get_normal_transition_kernel(prior_sample)
-    transition_kernels = fill(kernel, N-1)
+    transition_kernels = [transition_kernel_fn(prior_sample, i) for i in 1:(N-1)]
 
     return AnnealedISSampler(
         prior_sampling,
@@ -40,11 +47,34 @@ function AnnealedISSampler(prior_sampling, prior_density, joint_density, N::Int)
     )
 end
 
-function AnnealedISSampler(model::Turing.Model, N::Int)
+function AnnealedISSampler(prior_sampling, prior_density, joint_density, N::Int)
+    return AnnealedISSampler(
+        prior_sampling,
+        prior_density, 
+        joint_density, 
+        get_normal_transition_kernel,
+        N
+    )
+end
+
+function AnnealedISSampler(
+    model::Turing.Model, 
+    transition_kernel_fn::Function,
+    N::Int
+    )
     return AnnealedISSampler(
         rng -> sample_from_prior(rng, model),
         make_log_prior_density(model),
         make_log_joint_density(model),
+        transition_kernel_fn,
+        N
+    )
+end
+
+function AnnealedISSampler(model::Turing.Model, N::Int)
+    return AnnealedISSampler(
+        model,
+        get_normal_transition_kernel,
         N
     )
 end
@@ -158,6 +188,16 @@ function estimate_expectation(samples::Array{WeightedSample}, f)
     return weighted_sum / sum_weights
 end
 
+function effective_sample_size(samples::Array{WeightedSample}; normalise=true)
+    log_weights = map(s -> s.log_weight, samples)
+    denominator = logsumexp(2 * log_weights)
+    numerator = 1
+    if normalise
+        numerator = 2 * logsumexp(log_weights)
+    end
+
+    return exp(numerator - denominator)
+end
 
 ##############################
 # Transition kernels
@@ -166,16 +206,16 @@ end
 # TODO: How to tune the standard deviation?
 
 # TODO: Is this an appropriate type annotation?
-function get_normal_transition_kernel(prior_sample::T) where {T<:Real}
+function get_normal_transition_kernel(prior_sample::T, i) where {T<:Real}
     return Normal(0, 1) 
 end
 
-function get_normal_transition_kernel(prior_sample::AbstractArray)
+function get_normal_transition_kernel(prior_sample::AbstractArray, i)
     return MvNormal(size(prior_sample, 1), 1) 
 end
 
-function get_normal_transition_kernel(prior_sample::NamedTuple)
-    return map(get_normal_transition_kernel, prior_sample)
+function get_normal_transition_kernel(prior_sample::NamedTuple, i)
+    return map(x -> get_normal_transition_kernel(x, i), prior_sample)
 end
 
 # TODO: Possibly add this to AdvancedMH.jl
