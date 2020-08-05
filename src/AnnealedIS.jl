@@ -77,6 +77,15 @@ function logdensity(sampler::AnnealedISSampler, i, x)
     end
 end
 
+function logdensity_ratio(sampler::AnnealedISSampler, i, x)
+    prior_density = sampler.prior_density(x)
+    joint_density = sampler.joint_density(x)
+    beta_i = sampler.betas[i]
+    beta_ip1 = sampler.betas[i+1]
+
+    return (beta_ip1 - beta_i) * joint_density - (beta_ip1 - beta_i) * prior_density
+end
+
 """
 Sample from the ith transition kernel.
 """
@@ -90,16 +99,13 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
 
     # Do five steps of Metropolis-Hastings
     # TODO: Possible use an iterator approach from AbstractMCMC to avoid saving 
-    # unused samples.
+    # unused samples. NOTE: Requires AbstractMCMC 2
     spl = AdvancedMH.RWMH(sampler.transition_kernels[i-1])
     samples = sample(model, spl, 5; progress=false, init_params=x)
 
     return samples[end].params
 end
 
-"""
-First MC step.
-"""
 function single_sample(rng, sampler::AnnealedISSampler)
     N = length(sampler.betas)
     num_samples = N-1
@@ -107,15 +113,22 @@ function single_sample(rng, sampler::AnnealedISSampler)
     sample = sampler.prior_sampling(rng)
     # TODO: Assert that logdensity(sampler, 1, sample) is not -Inf because 
     # then our prior sampling or our density is wrong.
-    log_weight = logdensity(sampler, 2, sample) - logdensity(sampler, 1, sample)
-    if log_weight == -Inf
+    log_prior = logdensity(sampler, 1, sample)
+    log_transition = logdensity(sampler, 2, sample)
+    if (log_prior == -Inf || log_transition == -Inf)
         # We have an out of distribution sample.
-        return WeightedSample(log_weight, sample)
+        return WeightedSample(-Inf, sample)
     end
+    log_weight = log_transition - log_prior
 
     for i in 2:num_samples
         sample = transition_kernel(rng, sampler, i, sample)
-        log_weight += logdensity(sampler, i+1, sample) - logdensity(sampler, i, sample)
+        log_weight += logdensity_ratio(sampler, i, sample)
+    end
+
+    ws = WeightedSample(log_weight, sample)
+    return ws
+end
     end
 
     ws = WeightedSample(log_weight, sample)
@@ -175,25 +188,23 @@ AdvancedMH.RWMH(nt::NamedTuple) = MetropolisHastings(map(x -> RandomWalkProposal
 
 function sample_from_prior(rng, model)
     # TODO: Need to make use of rng.
-    # TODO: Need some default VarInfo because this always runs the model once
-    #   to get a TypedVarInfo.
     vi = Turing.VarInfo(model) 
-    model(vi)
 
     # Extract a NamedTuple from VarInfo which has variable names as keys and 
     # the sampled values as values.
     # TODO: Check that vi is TypedVarInfo
     vns = Turing.DynamicPPL._getvns(vi, Turing.SampleFromPrior())
-    vt = _val_tuple(vi, vns)
-    return vt
+    value_tuple = _val_tuple(vi, vns)
+    return value_tuple
 end
 
 """
 Returns a function which is the prior density.
 """
 function make_log_prior_density(model)
+    typed_vi = Turing.VarInfo(model)
     return function logprior_density(named_tuple)
-        vi = Turing.VarInfo(model)
+        vi = deepcopy(typed_vi)
         set_namedtuple!(vi, named_tuple)
         model(vi, Turing.SampleFromPrior(), Turing.PriorContext())
         return Turing.getlogp(vi)
@@ -201,8 +212,9 @@ function make_log_prior_density(model)
 end
 
 function make_log_joint_density(model)
+    typed_vi = Turing.VarInfo(model)
     return function logjoint_density(named_tuple)
-        vi = Turing.VarInfo(model)
+        vi = deepcopy(typed_vi)
         set_namedtuple!(vi, named_tuple)
         model(vi)
         return Turing.getlogp(vi)

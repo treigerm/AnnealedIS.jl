@@ -32,6 +32,11 @@ using AnnealedIS
         @test AnnealedIS.logdensity(ais, 1, samples[1]) == prior_density(samples[1])
         @test AnnealedIS.logdensity(ais, 3, samples[1]) == joint_density(samples[1])
         @test AnnealedIS.logdensity(ais, 2, samples[1]) == (0.5*prior_density(samples[1]) + 0.5*joint_density(samples[1]))
+
+        for i in 1:N
+            dratio = AnnealedIS.logdensity(ais, i+1, samples[1]) - AnnealedIS.logdensity(ais, i, samples[1])
+            @test AnnealedIS.logdensity_ratio(ais, i, samples[1]) == dratio
+        end
     end
 
     @testset "Convergence test" begin
@@ -64,7 +69,9 @@ using AnnealedIS
         tm = test_model(y_obs)
 
         named_tuple = sample_from_prior(rng, tm)
+        named_tuple2 = sample_from_prior(rng, tm)
         @test typeof(named_tuple[:x]) == Float64
+        @test named_tuple != named_tuple2
 
         # Test model with multiple latents and multivariate latent.
         D = 5
