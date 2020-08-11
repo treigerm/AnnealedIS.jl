@@ -9,6 +9,8 @@ using Random
 
 # Exports
 export AnnealedISSampler, 
+    RejectionResample,
+    SimpleRejection,
     ais_sample, 
     sample_from_prior, 
     make_log_prior_density, 
@@ -17,13 +19,23 @@ export AnnealedISSampler,
 
 # TODO: Make it possible to parallelize sampling; difficulty is thread-safe random number generation.
 
+abstract type RejectionSampler end
+
+"""
+Resample when a sample got rejected.
+"""
+struct RejectionResample <: RejectionSampler end
+
+struct SimpleRejection <: RejectionSampler end
+
 # TODO: Add types.
-struct AnnealedISSampler
+struct AnnealedISSampler{S<:RejectionSampler}
     prior_sampling::Function
     prior_density::Function
     joint_density::Function
-    betas
+    betas::Array{Float64}
     transition_kernels
+    rejection_sampler::S
 end
 
 function AnnealedISSampler(
@@ -31,8 +43,9 @@ function AnnealedISSampler(
     prior_density::Function, 
     joint_density::Function, 
     transition_kernel_fn::Function, 
-    N::Int
-)
+    N::Int,
+    rejection_sampler::T
+) where {T<:RejectionSampler}
     betas = collect(range(0, 1, length=N+1))
 
     prior_sample = prior_sampling(Random.GLOBAL_RNG)
@@ -43,7 +56,42 @@ function AnnealedISSampler(
         prior_density, 
         joint_density, 
         betas, 
-        transition_kernels
+        transition_kernels,
+        rejection_sampler
+    )
+end
+
+function AnnealedISSampler(
+    prior_sampling::Function, 
+    prior_density::Function, 
+    joint_density::Function, 
+    transition_kernel_fn::Function, 
+    N::Int
+)
+    return AnnealedISSampler(
+        prior_sampling,
+        prior_density,
+        joint_density,
+        transition_kernel_fn,
+        N,
+        SimpleRejection()
+    )
+end
+
+function AnnealedISSampler(
+    prior_sampling, 
+    prior_density, 
+    joint_density, 
+    N::Int,
+    rejection_sampler::T
+) where {T<:RejectionSampler}
+    return AnnealedISSampler(
+        prior_sampling,
+        prior_density, 
+        joint_density, 
+        get_normal_transition_kernel,
+        N,
+        rejection_sampler
     )
 end
 
@@ -136,28 +184,71 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
     return samples[end].params
 end
 
-function single_sample(rng, sampler::AnnealedISSampler)
-    N = length(sampler.betas)
-    num_samples = N-1
-
+function resample(rng, sampler::AnnealedISSampler{SimpleRejection}, num_rejected)
     sample = sampler.prior_sampling(rng)
-    # TODO: Assert that logdensity(sampler, 1, sample) is not -Inf because 
-    # then our prior sampling or our density is wrong.
     log_prior = logdensity(sampler, 1, sample)
     log_transition = logdensity(sampler, 2, sample)
     if (log_prior == -Inf || log_transition == -Inf)
-        # We have an out of distribution sample.
-        return WeightedSample(-Inf, sample)
+        # Reject sample.
+        return WeightedSample(-Inf, sample), true, num_rejected+1
+    else
+        log_weight = log_transition - log_prior
+        return WeightedSample(log_weight, sample), false, num_rejected
     end
-    log_weight = log_transition - log_prior
+end
+
+function resample(rng, sampler::AnnealedISSampler{RejectionResample}, num_rejected)
+    sample = sampler.prior_sampling(rng)
+    log_prior = logdensity(sampler, 1, sample)
+    log_transition = logdensity(sampler, 2, sample)
+    if (log_prior == -Inf || log_transition == -Inf)
+        # Reject sample.
+        return resample(rng, sampler, num_rejected+1)
+    else
+        log_weight = log_transition - log_prior
+        return WeightedSample(log_weight, sample), false, num_rejected
+    end
+end
+
+function single_sample(
+    rng, 
+    sampler::AnnealedISSampler; 
+    store_intermediate_samples=false
+)
+    N = length(sampler.betas)
+    num_samples = N-1
+
+    # TODO: Make this a named tuple.
+    diagnostics = Dict()
+
+    weighted_sample, early_return, num_rejected = resample(rng, sampler, 0)
+    diagnostics[:num_rejected] = num_rejected
+    log_weight, sample = weighted_sample.log_weight, weighted_sample.params
+
+    if store_intermediate_samples
+        diagnostics[:intermediate_samples] = Array{typeof(sample)}(
+            undef, 
+            Int(num_samples/10)+1
+        )
+        diagnostics[:intermediate_samples][1] = sample
+    end
+    if early_return
+        return weighted_sample, diagnostics
+    end
+
 
     for i in 2:num_samples
         sample = transition_kernel(rng, sampler, i, sample)
         log_weight += logdensity_ratio(sampler, i, sample)
+        if store_intermediate_samples && (i % 10 == 0)
+            ix = Int(i / 10) + 1
+            diagnostics[:intermediate_samples][ix] = sample
+        end
     end
 
     ws = WeightedSample(log_weight, sample)
-    return ws
+    return ws, diagnostics
+end
 end
     end
 
@@ -221,6 +312,26 @@ end
 # TODO: Possibly add this to AdvancedMH.jl
 AdvancedMH.RWMH(nt::NamedTuple) = MetropolisHastings(map(x -> RandomWalkProposal(x), nt))
 
+##############################
+# Utility functions
+##############################
+
+function add_diagnostics!(diagnostics, d, i)
+    for k in keys(d)
+        diagnostics[k][i] = d[k]
+    end
+end
+
+function init_diagnostics(first_diagnostics, num_samples)
+    diagnostics = Dict()
+    for k in keys(first_diagnostics)
+        diagnostics[k] = Array{typeof(first_diagnostics[k])}(
+        undef, num_samples)
+        diagnostics[k][1] = first_diagnostics[k]
+    end
+    
+    return diagnostics
+end
 
 ##############################
 # Turing Interop

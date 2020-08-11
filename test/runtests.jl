@@ -53,7 +53,7 @@ using AnnealedIS
         ais = AnnealedISSampler(
             prior_sampling, prior_density, joint_density, N)
 
-        samples = ais_sample(rng, ais, num_samples)
+        samples, diagnostics = ais_sample(rng, ais, num_samples)
 
         posterior_mean = AnnealedIS.estimate_expectation(samples, x -> x)
         @test isapprox(posterior_mean, [1.5]; atol=1e-2)
@@ -61,6 +61,7 @@ using AnnealedIS
         ess = effective_sample_size(samples)
         # TODO: What is a reasonable ESS to expect?
         @test ess > 900
+        @test ess == diagnostics[:ess]
     end
 
     @testset "Sample from Turing" begin
@@ -145,7 +146,7 @@ using AnnealedIS
         tm = test_model(y_obs)
 
         ais = AnnealedISSampler(tm, N)
-        samples = ais_sample(rng, ais, num_samples)
+        samples, diagnostics = ais_sample(rng, ais, num_samples)
     end
 
     @testset "Transition kernels" begin
@@ -153,5 +154,73 @@ using AnnealedIS
         expected_transition_kernel = (a = Normal(0, 1), b = MvNormal(2, 1.0))
         transition_kernel = AnnealedIS.get_normal_transition_kernel(prior_sample, 1)
         @test expected_transition_kernel == transition_kernel
+    end
+
+    @testset "Intermediate Samples" begin
+        N = 10 
+        num_samples = 10
+
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(x, 1)
+        end
+
+        y_obs = 2
+        tm = test_model(y_obs)
+
+        ais = AnnealedISSampler(tm, N) 
+        samples, diagnostics = ais_sample(
+            rng, ais, num_samples; store_intermediate_samples=true)
+
+        inter_samples = hcat(diagnostics[:intermediate_samples]...)
+        inter_samples = permutedims(inter_samples, [2, 1])
+        @test size(inter_samples) == (num_samples, 2)
+        @test map(x->x.params, samples) == inter_samples[:,end]
+    end
+
+    @testset "Resampling Tests" begin
+        D = 1
+        N = 10
+        num_samples = 100
+
+        y_obs = [3.0]
+
+        # Roughly half the samples should get rejected.
+        prior_sampling(rng) = rand(rng, MvNormal(D, 1.0))
+        prior_density(params) = logpdf(MvNormal(D, 1.0), params)
+        joint_density(params) = logpdf(MvNormal(params, I), y_obs) + prior_density(params) + log(max(params[1],0))
+
+        ais_simple_rejection = AnnealedISSampler(
+            prior_sampling, 
+            prior_density, 
+            joint_density, 
+            N
+        )
+        samples_no_resampling, no_resampling_diag = ais_sample(
+            rng, 
+            ais_simple_rejection, 
+            num_samples
+        )
+
+        ais_resampling = AnnealedISSampler(
+            prior_sampling, 
+            prior_density, 
+            joint_density, 
+            N,
+            RejectionResample()
+        )
+        samples_resampling, resampling_diag = ais_sample(rng, ais_resampling, num_samples)
+
+        non_zero_weights(samples) = sum(samples) do weighted_sample
+            Int(weighted_sample.log_weight != -Inf)
+        end
+
+        @test non_zero_weights(samples_resampling) == num_samples
+        @test sum(resampling_diag[:num_rejected]) > 0
+
+        num_accepted_samples = non_zero_weights(samples_no_resampling)
+        @test num_accepted_samples < num_samples
+        @test (num_samples - sum(no_resampling_diag[:num_rejected])) == num_accepted_samples
+        @test maximum(no_resampling_diag[:num_rejected]) == 1
     end
 end
