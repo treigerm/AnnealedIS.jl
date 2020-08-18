@@ -147,6 +147,14 @@ using AnnealedIS
 
         ais = AnnealedISSampler(tm, N)
         samples, diagnostics = ais_sample(rng, ais, num_samples)
+
+        chains = sample(rng, tm, AnIS(N), num_samples)
+
+        @test typeof(chains) <: MCMCChains.Chains
+        @test typeof(chains.logevidence) <: Real
+        @test haskey(chains.info, :ess)
+        @test haskey(get(chains, :log_weight), :log_weight)
+        @test haskey(get(chains, :x), :x)
     end
 
     @testset "Transition kernels" begin

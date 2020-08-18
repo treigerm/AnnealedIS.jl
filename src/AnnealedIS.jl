@@ -9,7 +9,10 @@ using Random
 
 # Exports
 export AnnealedISSampler, 
+    RejectionSampler,
     RejectionResample,
+    AnIS,
+    sample,
     SimpleRejection,
     ais_sample, 
     sample_from_prior, 
@@ -119,6 +122,22 @@ function AnnealedISSampler(
     )
 end
 
+function AnnealedISSampler(
+    model::Turing.Model, 
+    transition_kernel_fn::Function,
+    N::Int,
+    rejection_sampler::T
+) where {T<:RejectionSampler}
+    return AnnealedISSampler(
+        rng -> sample_from_prior(rng, model),
+        make_log_prior_density(model),
+        make_log_joint_density(model),
+        transition_kernel_fn,
+        N,
+        rejection_sampler
+    )
+end
+
 function AnnealedISSampler(model::Turing.Model, N::Int)
     return AnnealedISSampler(
         model,
@@ -127,10 +146,80 @@ function AnnealedISSampler(model::Turing.Model, N::Int)
     )
 end
 
+function AnnealedISSampler(
+    model::Turing.Model, 
+    N::Int, 
+    rejection_sampler::T
+) where {T<:RejectionSampler}
+    return AnnealedISSampler(
+        model,
+        get_normal_transition_kernel,
+        N,
+        rejection_sampler
+    )
+end
+
+struct AnISModel <: AbstractMCMC.AbstractModel
+    prior_sampling::Function
+    prior_density::Function
+    joint_density::Function
+end
+
+function AnISModel(m::Turing.Model)
+    return AnISModel(
+        rng -> sample_from_prior(rng, m),
+        make_log_prior_density(m),
+        make_log_joint_density(m)
+    )
+end
+
+struct AnIS{S<:RejectionSampler} <: Turing.InferenceAlgorithm
+    betas::Array{Float64}
+    transition_kernel_fn::Function
+    rejection_sampler::S
+end
+
+function AnIS(
+    transition_kernel_fn, 
+    N, 
+    rejection_sampler::S
+) where {S<:RejectionSampler}
+    betas = collect(range(0, 1, length=N+1))
+    return AnIS(
+        betas,
+        transition_kernel_fn,
+        rejection_sampler
+    )
+end
+
+function AnIS(N)
+    return AnIS(
+        get_normal_transition_kernel, 
+        N,
+        SimpleRejection()
+    )
+end
+
+function AnnealedISSampler(model::AnISModel, alg::AnIS)
+    return AnnealedISSampler(
+        model.prior_sampling,
+        model.prior_density,
+        model.joint_density,
+        alg.transition_kernel_fn,
+        length(alg.betas),
+        alg.rejection_sampler
+    )
+end
+
+function AnnealedISSampler(model::Turing.Model, alg::AnIS)
+    return AnnealedISSampler(AnISModel(model), alg)
+end
+
 """
 One importance sample with associated weight.
 """
 # TODO: Type annotations for better performance.
+# TODO: Possibly rename params into θ and add lp field to be consistent with Turing.
 struct WeightedSample 
     log_weight
     params
@@ -266,7 +355,15 @@ function ais_sample(rng, sampler, num_samples)
         samples[i] = single_sample(rng, sampler)
     end
 
-    return samples
+function ais_sample(
+    rng, 
+    model::AnISModel, 
+    sampler::AnIS, 
+    num_samples; 
+    kwargs...
+)
+    ais = AnnealedISSampler(model, sampler)
+    return ais_sample(rng, ais, num_samples; kwargs...)
 end
 
 function estimate_expectation(samples::Array{WeightedSample}, f)
@@ -370,6 +467,138 @@ function make_log_joint_density(model)
         model(vi)
         return Turing.getlogp(vi)
     end
+end
+
+function AbstractMCMC.sample(
+    rng::AbstractRNG,
+    model::T,
+    alg::AnIS,
+    num_samples::Int;
+    kwargs...
+) where {T <: Union{Turing.Model,AnISModel}}
+    anis = AnnealedISSampler(model, alg)
+    samples, diagnostics = ais_sample(rng, anis, num_samples)
+    return to_mcmcchains(samples, diagnostics)
+end
+
+function to_mcmcchains(samples, diagnostics)
+    # Part of this function is adapted from the generic Turing bundle_samples at
+    # https://github.com/TuringLang/Turing.jl/blob/60563a64c51f2ea465f85d819344be00d0186d1b/src/inference/Inference.jl
+
+    # Convert transitions to array format.
+    # Also retrieve the variable names.
+    nms, vals = _params_to_array(samples)
+
+    # Get the values of the extra parameters in each transition.
+    extra_params, extra_values = get_transition_extras(samples)
+
+    # Extract names & construct param array.
+    nms = [nms; extra_params]
+    parray = hcat(vals, extra_values)
+
+    # Calculate logevidence.
+    le = logsumexp(map(s -> s.log_weight, samples))
+
+    info = (
+        ess = diagnostics[:ess],
+    )
+
+    # Conretize the array before giving it to MCMCChains.
+    parray = MCMCChains.concretize(parray)
+
+    return MCMCChains.Chains(
+        parray,
+        string.(nms),
+        (internals = ["log_weight"],);
+        evidence=le,
+        info=info
+    )
+end
+
+##############################
+# Functions adapted from https://github.com/TuringLang/Turing.jl/blob/60563a64c51f2ea465f85d819344be00d0186d1b/src/inference/Inference.jl
+##############################
+
+"""
+    getparams(t)
+Return a named tuple of parameters.
+"""
+getparams(t::WeightedSample) = t.params
+
+function _params_to_array(ts::Vector)
+    names = Vector{Symbol}()
+    # Extract the parameter names and values from each transition.
+    dicts = map(ts) do t
+        nms, vs = flatten_namedtuple(getparams(t))
+        for nm in nms
+            if !(nm in names)
+                push!(names, nm)
+            end
+        end
+        # Convert the names and values to a single dictionary.
+        return Dict(nms[j] => vs[j] for j in 1:length(vs))
+    end
+    # names = collect(names_set)
+    vals = [get(dicts[i], key, missing) for i in eachindex(dicts), 
+        (j, key) in enumerate(names)]
+
+    return names, vals
+end
+
+function flatten_namedtuple(nt::NamedTuple)
+    names_vals = mapreduce(vcat, keys(nt)) do k
+        v = nt[k]
+        if length(v) == 1
+            return [(Symbol(k), v)]
+        else
+            return mapreduce(vcat, zip(v[1], v[2])) do (vnval, vn)
+                return collect(FlattenIterator(vn, vnval))
+            end
+        end
+    end
+    return [vn[1] for vn in names_vals], [vn[2] for vn in names_vals]
+end
+
+additional_parameters(::Type{<:WeightedSample}) = [:log_weight]
+
+function get_transition_extras(ts::AbstractVector)
+    # Get the extra field names from the sampler state type.
+    # This handles things like :lp or :weight.
+    extra_params = additional_parameters(eltype(ts))
+
+    # Get the values of the extra parameters.
+    local extra_names
+    all_vals = []
+
+    # Iterate through each transition.
+    for t in ts
+        extra_names = Symbol[]
+        vals = []
+
+        # Iterate through each of the additional field names
+        # in the struct.
+        for p in extra_params
+            # Check whether the field contains a NamedTuple,
+            # in which case we need to iterate through each
+            # key/value pair.
+            prop = getproperty(t, p)
+            if prop isa NamedTuple
+                for (k, v) in pairs(prop)
+                    push!(extra_names, Symbol(k))
+                    push!(vals, v)
+                end
+            else
+                push!(extra_names, Symbol(p))
+                push!(vals, prop)
+            end
+        end
+        push!(all_vals, vals)
+    end
+
+    # Convert the vector-of-vectors to a matrix.
+    valmat = [all_vals[i][j] for i in 1:length(ts), j in 1:length(all_vals[1])]
+
+    return extra_names, valmat
 end
 
 ##############################
