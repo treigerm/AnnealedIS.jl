@@ -139,6 +139,7 @@ using AnnealedIS
 
         @model function test_model(y)
             x ~ Normal(0, 1)
+            z ~ MvNormal(zeros(2))
             y ~ Normal(x, 1)
         end
 

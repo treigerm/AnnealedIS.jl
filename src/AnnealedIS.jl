@@ -478,7 +478,17 @@ function AbstractMCMC.sample(
 ) where {T <: Union{Turing.Model,AnISModel}}
     anis = AnnealedISSampler(model, alg)
     samples, diagnostics = ais_sample(rng, anis, num_samples)
+    samples = make_turing_samples(samples, model)
     return to_mcmcchains(samples, diagnostics)
+end
+
+function make_turing_samples(samples, model::Turing.Model)
+    vi = Turing.VarInfo(model)
+    return map(samples) do sample 
+        set_namedtuple!(vi, sample.params)
+        nt = DynamicPPL.tonamedtuple(vi)
+        (θ = nt, log_weight = sample.log_weight)
+    end
 end
 
 function to_mcmcchains(samples, diagnostics)
@@ -523,10 +533,10 @@ end
     getparams(t)
 Return a named tuple of parameters.
 """
-getparams(t::WeightedSample) = t.params
+getparams(t) = t.θ
 
 function _params_to_array(ts::Vector)
-    names = Vector{Symbol}()
+    names = Vector{String}()
     # Extract the parameter names and values from each transition.
     dicts = map(ts) do t
         nms, vs = flatten_namedtuple(getparams(t))
@@ -549,7 +559,7 @@ function flatten_namedtuple(nt::NamedTuple)
     names_vals = mapreduce(vcat, keys(nt)) do k
         v = nt[k]
         if length(v) == 1
-            return [(Symbol(k), v)]
+            return [(String(k), v)]
         else
             return mapreduce(vcat, zip(v[1], v[2])) do (vnval, vn)
                 return collect(FlattenIterator(vn, vnval))
@@ -559,7 +569,7 @@ function flatten_namedtuple(nt::NamedTuple)
     return [vn[1] for vn in names_vals], [vn[2] for vn in names_vals]
 end
 
-additional_parameters(::Type{<:WeightedSample}) = [:log_weight]
+additional_parameters(::Type{<:NamedTuple}) = [:log_weight]
 
 function get_transition_extras(ts::AbstractVector)
     # Get the extra field names from the sampler state type.
@@ -681,5 +691,70 @@ end
         for name in names]
     return expr
 end
+
+##############################
+# Functions from https://github.com/TuringLang/Turing.jl/blob/515c4d5316d52619388557af8f850740ae310122/src/utilities/helper.jl
+##############################
+
+struct FlattenIterator{Tname, Tvalue}
+    name::Tname
+    value::Tvalue
+end
+
+Base.length(iter::FlattenIterator) = _length(iter.value)
+_length(a::AbstractArray) = sum(_length, a)
+_length(a::AbstractArray{<:Number}) = length(a)
+_length(::Number) = 1
+
+Base.eltype(iter::FlattenIterator{String}) = Tuple{String, _eltype(typeof(iter.value))}
+_eltype(::Type{TA}) where {TA <: AbstractArray} = _eltype(eltype(TA))
+_eltype(::Type{T}) where {T <: Number} = T
+
+@inline function Base.iterate(iter::FlattenIterator{String, <:Number}, i = 1)
+    i === 1 && return (iter.name, iter.value), 2
+    return nothing
+end
+@inline function Base.iterate(
+    iter::FlattenIterator{String, <:AbstractArray{<:Number}}, 
+    ind = (1,),
+)
+    i = ind[1]
+    i > length(iter.value) && return nothing
+    name = getname(iter, i)
+    return (name, iter.value[i]), (i+1,)
+end
+@inline function Base.iterate(
+    iter::FlattenIterator{String, T},
+    ind = startind(T),
+) where {T <: AbstractArray}
+    i = ind[1]
+    i > length(iter.value) && return nothing
+    name = getname(iter, i)
+    local out
+    while i <= length(iter.value)
+        v = iter.value[i]
+        out = iterate(FlattenIterator(name, v), Base.tail(ind))
+        out !== nothing && break
+        i += 1
+    end
+    if out === nothing
+        return nothing
+    else
+        return out[1], (i, out[2]...)
+    end
+end
+
+@inline startind(::Type{<:AbstractArray{T}}) where {T} = (1, startind(T)...)
+@inline startind(::Type{<:Number}) = ()
+@inline startind(::Type{<:Any}) = throw("Type not supported.")
+@inline function getname(iter::FlattenIterator, i::Int)
+    name = string(ind2sub(size(iter.value), i))
+    name = replace(name, "(" => "[");
+    name = replace(name, ",)" => "]");
+    name = replace(name, ")" => "]");
+    name = iter.name * name
+    return name
+end
+@inline ind2sub(v, i) = Tuple(CartesianIndices(v)[i])
 
 end
