@@ -345,14 +345,30 @@ end
     return ws
 end
 
-function ais_sample(rng, sampler, num_samples)
-    first_sample = single_sample(rng, sampler)
-    samples = Array{typeof(first_sample)}(undef, num_samples) # TODO: Is this best practice?
+function ais_sample(rng, sampler, num_samples; store_intermediate_samples=false)
+    first_sample, first_diagnostics = single_sample(
+        rng, 
+        sampler;
+        store_intermediate_samples=store_intermediate_samples
+    )
+    samples = Array{typeof(first_sample)}(undef, num_samples)
     samples[1] = first_sample
+
+    diagnostics = init_diagnostics(first_diagnostics, num_samples)
 
     # TODO: Parallelize the loop.
     for i = 2:num_samples
-        samples[i] = single_sample(rng, sampler)
+        samples[i], d = single_sample(
+            rng, 
+            sampler; 
+            store_intermediate_samples=store_intermediate_samples
+        )
+        add_diagnostics!(diagnostics, d, i)
+    end
+
+    diagnostics[:ess] = effective_sample_size(samples)
+
+    return samples, diagnostics
     end
 
 function ais_sample(
@@ -390,8 +406,6 @@ end
 ##############################
 # Transition kernels
 ##############################
-
-# TODO: How to tune the standard deviation?
 
 # TODO: Is this an appropriate type annotation?
 function get_normal_transition_kernel(prior_sample::T, i) where {T<:Real}
@@ -440,7 +454,6 @@ function sample_from_prior(rng, model)
 
     # Extract a NamedTuple from VarInfo which has variable names as keys and 
     # the sampled values as values.
-    # TODO: Check that vi is TypedVarInfo
     vns = Turing.DynamicPPL._getvns(vi, Turing.SampleFromPrior())
     value_tuple = _val_tuple(vi, vns)
     return value_tuple
@@ -477,7 +490,7 @@ function AbstractMCMC.sample(
     kwargs...
 ) where {T <: Union{Turing.Model,AnISModel}}
     anis = AnnealedISSampler(model, alg)
-    samples, diagnostics = ais_sample(rng, anis, num_samples)
+    samples, diagnostics = ais_sample(rng, anis, num_samples; kwargs...)
     samples = make_turing_samples(samples, model)
     return to_mcmcchains(samples, diagnostics)
 end
@@ -507,11 +520,15 @@ function to_mcmcchains(samples, diagnostics)
     parray = hcat(vals, extra_values)
 
     # Calculate logevidence.
-    le = logsumexp(map(s -> s.log_weight, samples))
+    le = logsumexp(map(s -> s.log_weight, samples)) - log(length(samples))
 
-    info = (
-        ess = diagnostics[:ess],
+    info = Dict{Symbol,Any}(
+        :ess => diagnostics[:ess],
     )
+    if haskey(diagnostics, :intermediate_samples)
+        info[:intermediate_samples] = diagnostics[:intermediate_samples]
+    end
+    info = (;info...)
 
     # Conretize the array before giving it to MCMCChains.
     parray = MCMCChains.concretize(parray)

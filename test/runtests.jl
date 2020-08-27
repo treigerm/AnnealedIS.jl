@@ -156,6 +156,16 @@ using AnnealedIS
         @test haskey(chains.info, :ess)
         @test haskey(get(chains, :log_weight), :log_weight)
         @test haskey(get(chains, :x), :x)
+
+        # Test intermediate samples
+        chains = sample(
+            rng, tm, AnIS(10), num_samples; store_intermediate_samples=true
+        )
+        @test haskey(chains.info, :intermediate_samples)
+
+        inter_samples = hcat(chains.info[:intermediate_samples]...)
+        inter_samples = permutedims(inter_samples, [2, 1])
+        @test size(inter_samples) == (num_samples, 2)
     end
 
     @testset "Transition kernels" begin
@@ -231,5 +241,17 @@ using AnnealedIS
         @test num_accepted_samples < num_samples
         @test (num_samples - sum(no_resampling_diag[:num_rejected])) == num_accepted_samples
         @test maximum(no_resampling_diag[:num_rejected]) == 1
+    end
+
+    @testset "Out of distribution catch" begin
+        @model function model()
+            x ~ LogNormal(1, 1)
+        end
+
+        prior_density = make_log_prior_density(model())
+        joint_density = make_log_joint_density(model())
+
+        @test prior_density((x = -1,)) == -Inf
+        @test joint_density((x = -1,)) == -Inf
     end
 end
