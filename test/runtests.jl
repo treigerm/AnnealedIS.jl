@@ -64,6 +64,31 @@ using AnnealedIS
         @test ess == diagnostics[:ess]
     end
 
+    @testset "Logdensity ratio" begin
+        D = 1
+        N = 100
+        num_samples = 1000
+
+        y_obs = [3.0]
+
+        prior_sampling(rng) = rand(rng, MvNormal(D, 1.0))
+        prior_density(params) = logpdf(MvNormal(D, 1.0), params)
+        joint_density(params) = logpdf(MvNormal(params, I), y_obs) + prior_density(params)
+
+        ais = AnnealedISSampler(
+            prior_sampling, prior_density, joint_density, N)
+        
+        sample = [1.0]
+        
+        for i in 1:(length(ais.betas)-1)
+            @test isapprox(
+                AnnealedIS.logdensity_ratio(ais, i, sample),
+                (AnnealedIS.logdensity(ais, i+1, sample) - AnnealedIS.logdensity(ais, i, sample)); 
+                atol=1e-05 # TODO: What is the numerical error we would expect?
+            )
+        end
+    end
+
     @testset "Sample from Turing" begin
         @model function test_model(y)
             x ~ Normal(0, 1)
