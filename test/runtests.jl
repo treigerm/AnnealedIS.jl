@@ -191,6 +191,11 @@ using AnnealedIS
         inter_samples = hcat(chains.info[:intermediate_samples]...)
         inter_samples = permutedims(inter_samples, [2, 1])
         @test size(inter_samples) == (num_samples, 2)
+
+        @test haskey(chains.info, :intermediate_log_weights)
+        inter_weights = hcat(chains.info[:intermediate_log_weights]...)
+        inter_weights = permutedims(inter_weights, [2, 1])
+        @test size(inter_weights) == (num_samples, 2)
     end
 
     @testset "Transition kernels" begin

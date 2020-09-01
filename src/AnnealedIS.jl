@@ -41,6 +41,11 @@ struct AnnealedISSampler{S<:RejectionSampler}
     rejection_sampler::S
 end
 
+function Base.show(io::IO, anis::AnnealedISSampler)
+    s = "AnnealedIS(num_betas=$(length(anis.betas)),rejection=$(anis.rejection_sampler))"
+    print(io, s)
+end
+
 function AnnealedISSampler(
     prior_sampling::Function, 
     prior_density::Function, 
@@ -200,13 +205,19 @@ function AnIS(N)
     )
 end
 
+function Base.show(io::IO, anis::AnIS)
+    s = "AnnealedIS(num_betas=$(length(anis.betas)),rejection=$(anis.rejection_sampler))"
+    print(io, s)
+end
+
+
 function AnnealedISSampler(model::AnISModel, alg::AnIS)
     return AnnealedISSampler(
         model.prior_sampling,
         model.prior_density,
         model.joint_density,
         alg.transition_kernel_fn,
-        length(alg.betas),
+        length(alg.betas)-1,
         alg.rejection_sampler
     )
 end
@@ -315,11 +326,17 @@ function single_sample(
     log_weight, sample = weighted_sample.log_weight, weighted_sample.params
 
     if store_intermediate_samples
+        # FIXME: Number of annealing distributions has to be multiple of 10.
         diagnostics[:intermediate_samples] = Array{typeof(sample)}(
             undef, 
             Int(num_samples/10)+1
         )
+        diagnostics[:intermediate_log_weights] = Array{typeof(log_weight)}(
+            undef, 
+            Int(num_samples/10)+1
+        )
         diagnostics[:intermediate_samples][1] = sample
+        diagnostics[:intermediate_log_weights][1] = log_weight
     end
     if early_return
         return weighted_sample, diagnostics
@@ -332,6 +349,7 @@ function single_sample(
         if store_intermediate_samples && (i % 10 == 0)
             ix = Int(i / 10) + 1
             diagnostics[:intermediate_samples][ix] = sample
+            diagnostics[:intermediate_log_weights][ix] = log_weight
         end
     end
 
@@ -527,6 +545,7 @@ function to_mcmcchains(samples, diagnostics)
     )
     if haskey(diagnostics, :intermediate_samples)
         info[:intermediate_samples] = diagnostics[:intermediate_samples]
+        info[:intermediate_log_weights] = diagnostics[:intermediate_log_weights]
     end
     info = (;info...)
 
