@@ -1,6 +1,7 @@
 using Turing
 using Distributions
 using AdvancedMH
+using AdvancedHMC
 using LinearAlgebra: I
 using Random
 using Test
@@ -184,18 +185,18 @@ using AnnealedIS
 
         # Test intermediate samples
         chains = sample(
-            rng, tm, AnIS(10), num_samples; store_intermediate_samples=true
+            rng, tm, AnIS(20), num_samples; store_intermediate_samples=true
         )
         @test haskey(chains.info, :intermediate_samples)
 
         inter_samples = hcat(chains.info[:intermediate_samples]...)
         inter_samples = permutedims(inter_samples, [2, 1])
-        @test size(inter_samples) == (num_samples, 2)
+        @test size(inter_samples) == (num_samples, 11)
 
         @test haskey(chains.info, :intermediate_log_weights)
         inter_weights = hcat(chains.info[:intermediate_log_weights]...)
         inter_weights = permutedims(inter_weights, [2, 1])
-        @test size(inter_weights) == (num_samples, 2)
+        @test size(inter_weights) == (num_samples, 11)
     end
 
     @testset "Transition kernels" begin
@@ -206,7 +207,7 @@ using AnnealedIS
     end
 
     @testset "Intermediate Samples" begin
-        N = 10 
+        N = 20 
         num_samples = 10
 
         @model function test_model(y)
@@ -223,7 +224,7 @@ using AnnealedIS
 
         inter_samples = hcat(diagnostics[:intermediate_samples]...)
         inter_samples = permutedims(inter_samples, [2, 1])
-        @test size(inter_samples) == (num_samples, 2)
+        @test size(inter_samples) == (num_samples, 11)
         @test map(x->x.params, samples) == inter_samples[:,end]
     end
 
@@ -283,5 +284,55 @@ using AnnealedIS
 
         @test prior_density((x = -1,)) == -Inf
         @test joint_density((x = -1,)) == -Inf
+    end
+
+    @testset "AnISHMC" begin
+        betas = [0.0, 0.5, 1.0]
+        proposal = AdvancedHMC.StaticTrajectory(AdvancedHMC.Leapfrog(0.05), 10)
+        anis = AnISHMC(
+            betas,
+            proposal,
+            10,
+            SimpleRejection()
+        )
+        @test anis.betas[1] == 0.0
+    end
+
+    @testset "AnnealedISSamplerHMC" begin
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(x, 1)
+        end
+
+        betas = [0.0, 0.5, 1.0]
+        proposal = AdvancedHMC.StaticTrajectory(AdvancedHMC.Leapfrog(0.05), 10)
+        anis = AnISHMC(
+            betas,
+            proposal,
+            10,
+            SimpleRejection()
+        )
+
+        anis_sampler = AnnealedISSamplerHMC(test_model(3), anis)
+        @test length(anis_sampler.hamiltonians) == 2
+
+        prior_sample = anis_sampler.prior_sampling()
+        @test prior_sample != anis_sampler.prior_sampling()
+
+        # new_sample = AnnealedIS.transition_kernel(
+        #     Random.GLOBAL_RNG, 
+        #     anis_sampler,
+        #     2,
+        #     prior_sample
+        # )
+
+        samples, diag = ais_sample(
+            Random.GLOBAL_RNG, 
+            anis_sampler,
+            10
+        )
+        chain = sample(Random.GLOBAL_RNG, test_model(3), anis, 10)
+        @show get(chain, :x)[:x]
+        @show get(chain, :log_weight)[:log_weight]
     end
 end
