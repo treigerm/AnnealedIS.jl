@@ -2,11 +2,20 @@ using Turing
 using Distributions
 using AdvancedMH
 using AdvancedHMC
-using LinearAlgebra: I
+using LinearAlgebra: I, dot
 using Random
 using Test
 
 using AnnealedIS
+
+function geomspace(start, stop, length)
+    logstart = log10(start)
+    logstop = log10(stop)
+    points = 10 .^ range(logstart, logstop; length=length)
+    points[1] = start
+    points[end] = stop
+    return points
+end
 
 @testset "AnnealedIS.jl" begin
     rng = MersenneTwister(42)
@@ -57,7 +66,7 @@ using AnnealedIS
         samples, diagnostics = ais_sample(rng, ais, num_samples)
 
         posterior_mean = AnnealedIS.estimate_expectation(samples, x -> x)
-        @test isapprox(posterior_mean, [1.5]; atol=1e-2)
+        @test isapprox(posterior_mean, [1.5]; atol=3e-2)
 
         ess = effective_sample_size(samples)
         # TODO: What is a reasonable ESS to expect?
@@ -76,8 +85,12 @@ using AnnealedIS
         prior_density(params) = logpdf(MvNormal(D, 1.0), params)
         joint_density(params) = logpdf(MvNormal(params, I), y_obs) + prior_density(params)
 
+        betas = (geomspace(1, 1001, N+1) .- 1) ./ 1000
+        anis_alg = 
         ais = AnnealedISSampler(
-            prior_sampling, prior_density, joint_density, N)
+            AnnealedIS.AnISModel(prior_sampling, prior_density, joint_density), 
+            AnIS(betas, (x, i) -> Normal(0, 1), SimpleRejection())
+        )
         
         sample = [1.0]
         
@@ -85,7 +98,7 @@ using AnnealedIS
             @test isapprox(
                 AnnealedIS.logdensity_ratio(ais, i, sample),
                 (AnnealedIS.logdensity(ais, i+1, sample) - AnnealedIS.logdensity(ais, i, sample)); 
-                atol=1e-05 # TODO: What is the numerical error we would expect?
+                atol=1e-12 # TODO: What is the numerical error we would expect?
             )
         end
     end
@@ -299,6 +312,87 @@ using AnnealedIS
     end
 
     @testset "AnnealedISSamplerHMC" begin
+        N = 100
+        num_samples = 1000
+
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(x, 1)
+        end
+        
+        yval = 3
+        tm = test_model(yval)
+
+        #betas = collect(range(0, 1, length=100))
+        betas = (geomspace(1, 1001, 101) .- 1) ./ 1000
+        proposal = AdvancedHMC.StaticTrajectory(AdvancedHMC.Leapfrog(0.05), 10)
+        anis = AnISHMC(
+            betas,
+            proposal,
+            5,
+            SimpleRejection()
+        )
+        spl = Turing.DynamicPPL.Sampler(anis, tm)
+        anis_sampler = AnnealedISSamplerHMC(tm, anis, spl)
+
+        # Check that hamiltonians are correct. The first hamiltonian should 
+        # have the target density specified by the first non-zero beta.
+        prior_sample = anis_sampler.prior_sampling()
+        for i in 2:(length(betas)-1)
+            h = anis_sampler.hamiltonians[i-1]
+            d = AnnealedIS.logdensity(anis_sampler, i, prior_sample)
+            @test h.ℓπ(prior_sample) == d
+
+            dr = AnnealedIS.logdensity_ratio(anis_sampler, i, prior_sample)
+            hp1 = anis_sampler.hamiltonians[i]
+            hdr = hp1.ℓπ(prior_sample) - h.ℓπ(prior_sample)
+            @test isapprox(dr, hdr, atol=1e-12)
+        end
+
+        #@time begin
+        #chain = sample(Random.GLOBAL_RNG, test_model(yval), anis, num_samples)
+        #end
+        #@test chain.info[:ess] > 900
+
+        #samples = Array(chain[:x])[:,1]
+        #log_weights = Array(chain[:log_weight])[:,1]
+
+        #posterior_mean = dot(samples, exp.(log_weights)) / (num_samples * exp(chain.logevidence))
+        #@test isapprox(posterior_mean, 1.5; atol=3e-2)
+    end
+
+    # @testset "Constrained Variables" begin
+    #     @model function test_model(y)
+    #         x ~ Beta(1, 1)
+    #         y ~ Normal(x, 1)
+    #     end
+    #     yval = 3
+
+    #     betas = [0.0, 0.5, 1.0]
+    #     proposal = AdvancedHMC.StaticTrajectory(AdvancedHMC.Leapfrog(0.05), 10)
+    #     anis = AnISHMC(
+    #         betas,
+    #         proposal,
+    #         10,
+    #         SimpleRejection()
+    #     )
+
+    #     #chain = sample(Random.GLOBAL_RNG, test_model(yval), anis, 10)
+    #     #xs = Array(chain[:x])
+    #     #@test all(0 .< xs) && all(xs .<= 1)
+
+    #     true_logjoint(x) = logpdf(Beta(1, 1), x) + logpdf(Normal(x, 1), yval)
+    #     tm = test_model(yval)
+    #     spl = Turing.DynamicPPL.Sampler(anis, tm)
+    #     Turing.DynamicPPL.link!(spl.state.vi, spl)
+    #     logjoint = AnnealedIS.gen_logjoint(spl.state.vi, tm, spl)
+
+    #     @test logjoint([2.0]) == true_logjoint(2)
+    #     @show logjoint([2.0])
+    #     @test logjoint([0.5]) == true_logjoint(0.5)
+    # end
+
+    @testset "Density closures" begin
         @model function test_model(y)
             x ~ Normal(0, 1)
             y ~ Normal(x, 1)
@@ -313,26 +407,43 @@ using AnnealedIS
             SimpleRejection()
         )
 
-        anis_sampler = AnnealedISSamplerHMC(test_model(3), anis)
-        @test length(anis_sampler.hamiltonians) == 2
+        yval = 3
+        tm = test_model(yval)
+        spl = Turing.DynamicPPL.Sampler(anis, tm)
 
-        prior_sample = anis_sampler.prior_sampling()
-        @test prior_sample != anis_sampler.prior_sampling()
+        vi = spl.state.vi
+        logjoint = AnnealedIS.gen_logjoint(vi, tm, spl)
+        logprior = AnnealedIS.gen_logprior(vi, tm, spl)
 
-        # new_sample = AnnealedIS.transition_kernel(
-        #     Random.GLOBAL_RNG, 
-        #     anis_sampler,
-        #     2,
-        #     prior_sample
-        # )
+        true_logjoint(x) = logpdf(Normal(0, 1), x[1]) + logpdf(Normal(x[1], 1), yval)
+        @test logjoint([2.0]) == true_logjoint([2])
 
-        samples, diag = ais_sample(
-            Random.GLOBAL_RNG, 
-            anis_sampler,
-            10
-        )
-        chain = sample(Random.GLOBAL_RNG, test_model(3), anis, 10)
-        @show get(chain, :x)[:x]
-        @show get(chain, :log_weight)[:log_weight]
+        true_logprior(x) = logpdf(Normal(0, 1), x[1])
+        @test logprior([2.0]) == true_logprior([2])
+
+        # Tests to check whether functions are ThreadSafe.
+        num_vals = 20
+        test_vals = rand(num_vals)
+        test_vals = [[x] for x in test_vals]
+
+        spl = Turing.SampleFromPrior()
+        vi = Turing.VarInfo(tm)
+        logjoint = AnnealedIS.gen_logjoint(vi, tm, spl)
+        logjoint_grad = AnnealedIS.gen_logjoint_grad(vi, tm, spl)
+
+        logprior = AnnealedIS.gen_logprior(vi, tm, spl)
+        logprior_grad = AnnealedIS.gen_logprior_grad(vi, tm, spl)
+
+        for fn in [logjoint, logjoint_grad, logprior, logprior_grad]
+            vals_seq = map(fn, test_vals)
+            vals_parallel = similar(vals_seq)
+            Threads.@threads for i in 1:num_vals
+                vals_parallel[i] = fn(test_vals[i])
+            end
+            @test vals_seq == vals_parallel
+
+            vals_broadcast = fn.(test_vals)
+            @test vals_seq == vals_broadcast
+        end
     end
 end

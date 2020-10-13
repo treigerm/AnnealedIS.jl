@@ -6,14 +6,18 @@ version = "0.1.0"
 [deps]
 AdvancedHMC = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
 AdvancedMH = "5b7e9947-ddc0-4b3f-9b55-0d8042f74170"
+Bijectors = "76274a88-744f-5084-9051-94815aaf08c4"
+Coverage = "a2441757-f6aa-5fb2-8edb-039e3f45d037"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Memoization = "6fafb56a-5788-4b4e-91ca-c0cea6611c73"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReverseDiff = "37e2e3b7-166d-5795-8a7a-e32c996b4267"
 StatsFuns = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 
 [compat]
+Turing = "0.14.1"
 julia = "1"
 
 [extras]

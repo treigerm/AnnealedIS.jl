@@ -20,23 +20,31 @@ end
     gen_logjoint(v, model, spl)
 Return the log joint density function corresponding to model.
 """
-function gen_logjoint(v, model, spl)
+function gen_logjoint(vi, model, spl)
+    # TODO: Would this be thread-safe if we would copy the sampler N times?
+    vis = [deepcopy(vi) for _ in 1:Threads.nthreads()]
+    mdls = [deepcopy(model) for _ in 1:Threads.nthreads()]
+    spls = [deepcopy(spl) for _ in 1:Threads.nthreads()]
+
     function logjoint(z)::Float64
-        z_old, lj_old = v[spl], getlogp(v) 
-        v[spl] = z
-        model(v, spl)
-        lj = getlogp(v)
-        v[spl] = z_old
-        setlogp!(v, lj_old)
+        tid = Threads.threadid()
+        vis[tid][spls[tid]] = z
+        mdls[tid](vis[tid], spls[tid])
+        lj = getlogp(vis[tid])
         return lj
     end
     return logjoint
 end
 
-function gen_logjoint_grad(vi, model, spl::Turing.DynamicPPL.Sampler)
+function gen_logjoint_grad(vi, model, spl)
+    vis = [deepcopy(vi) for _ in 1:Threads.nthreads()]
+    mdls = [deepcopy(model) for _ in 1:Threads.nthreads()]
+    spls = [deepcopy(spl) for _ in 1:Threads.nthreads()]
+
     function logjoint_grad(x)
+        tid = Threads.threadid()
         return Turing.Core.gradient_logp(
-            x, vi, model, spl
+            x, vis[tid], mdls[tid], spls[tid]
         )
     end
     return logjoint_grad
@@ -46,23 +54,33 @@ end
     gen_logprior(v, model, spl)
 Return the log prior density function corresponding to model.
 """
-function gen_logprior(v, model, spl)
+function gen_logprior(vi, model, spl)
+    vis = [deepcopy(vi) for _ in 1:Threads.nthreads()]
+    mdls = [deepcopy(model) for _ in 1:Threads.nthreads()]
+
     function logprior(z)::Float64
-        z_old, lj_old = v[spl], getlogp(v)
-        v[spl] = z
-        model(v, Turing.SampleFromPrior(), Turing.DynamicPPL.PriorContext())
-        lj = getlogp(v)
-        v[spl] = z_old
-        setlogp!(v, lj_old)
+        tid = Threads.threadid()
+        vis[tid][Turing.SampleFromPrior()] = z
+        mdls[tid](
+            vis[tid], 
+            Turing.SampleFromPrior(), 
+            Turing.DynamicPPL.PriorContext()
+        )
+        lj = getlogp(vis[tid])
         return lj
     end
     return logprior
 end
 
-function gen_logprior_grad(v, model, spl)
+function gen_logprior_grad(vi, model, spl)
+    vis = [deepcopy(vi) for _ in 1:Threads.nthreads()]
+    mdls = [deepcopy(model) for _ in 1:Threads.nthreads()]
+    spls = [deepcopy(spl) for _ in 1:Threads.nthreads()]
+
     function logprior_grad(x)
+        tid = Threads.threadid()
         return Turing.Core.gradient_logp(
-            x, v, model, spl, Turing.DynamicPPL.PriorContext()
+            x, vis[tid], mdls[tid], spls[tid], Turing.DynamicPPL.PriorContext()
         )
     end
     return logprior_grad
@@ -93,20 +111,24 @@ end
 """
 Returns a function which is the prior density.
 """
-function make_log_prior_density(model)
-    typed_vi = Turing.VarInfo(model)
+function make_log_prior_density(model, vi=nothing)
+    if isnothing(vi)
+        vi = Turing.VarInfo(model)
+    end
+
     return function logprior_density(named_tuple)
-        vi = deepcopy(typed_vi)
         set_namedtuple!(vi, named_tuple)
         model(vi, Turing.SampleFromPrior(), Turing.PriorContext())
         return Turing.getlogp(vi)
     end
 end
 
-function make_log_joint_density(model)
-    typed_vi = Turing.VarInfo(model)
+function make_log_joint_density(model, vi=nothing)
+    if isnothing(vi)
+        vi = Turing.VarInfo(model)
+    end
+
     return function logjoint_density(named_tuple)
-        vi = deepcopy(typed_vi)
         set_namedtuple!(vi, named_tuple)
         model(vi)
         return Turing.getlogp(vi)
@@ -120,7 +142,8 @@ function AbstractMCMC.sample(
     num_samples::Int;
     kwargs...
 ) where {T <: Union{Turing.Model,AnISModel}}
-    anis = AnnealedISSampler(model, alg)
+    vi = Turing.VarInfo(model)
+    anis = AnnealedISSampler(model, alg, vi)
     samples, diagnostics = ais_sample(rng, anis, num_samples; kwargs...)
     samples = make_turing_samples(samples, model)
     return to_mcmcchains(samples, diagnostics)
@@ -133,9 +156,14 @@ function AbstractMCMC.sample(
     num_samples::Int;
     kwargs...
 ) where {T <: Union{Turing.Model,AnISModel}}
-    anis = AnnealedISSamplerHMC(model, alg)
+    spl = Turing.DynamicPPL.Sampler(alg, model)
+    # Transform variables from X -> R
+    #Turing.DynamicPPL.link!(spl.state.vi, spl)
+
+    anis = AnnealedISSamplerHMC(model, alg, spl)
     samples, diagnostics = ais_sample(rng, anis, num_samples; kwargs...)
-    samples = make_turing_samples(samples, model, Turing.DynamicPPL.Sampler(alg, model))
+    #Turing.DynamicPPL.link!(spl.state.vi, spl)
+    samples = make_turing_samples(samples, model, spl)
     return to_mcmcchains(samples, diagnostics)
 end
 
@@ -287,7 +315,7 @@ end
 ##############################
 
 # Code from https://github.com/TuringLang/Turing.jl/blob/master/src/inference/mh.jl
-function set_namedtuple!(vi::Turing.VarInfo, nt::NamedTuple)
+function set_namedtuple!(vi, nt::NamedTuple)
     for (n, vals) in pairs(nt)
         vns = vi.metadata[n].vns
         nvns = length(vns)
@@ -351,7 +379,7 @@ function reconstruct(
 end
 
 @generated function _val_tuple(
-    vi::Turing.VarInfo,
+    vi,
     vns::NamedTuple{names}
 ) where {names}
     isempty(names) === 0 && return :(NamedTuple())
@@ -433,62 +461,62 @@ end
 #### Compiler interface, i.e. tilde operators.
 ####
 #### Taken from https://github.com/TuringLang/Turing.jl/blob/master/src/inference/hmc.jl
-function DynamicPPL.assume(
-    rng,
-    spl::Sampler{<:AnISHMC},
-    dist::Distribution,
-    vn::VarName,
-    vi,
-)
-    updategid!(vi, vn, spl)
-    r = vi[vn]
-    # acclogp!(vi, logpdf_with_trans(dist, r, istrans(vi, vn)))
-    # r
-    return r, logpdf_with_trans(dist, r, istrans(vi, vn))
-end
+# function DynamicPPL.assume(
+#     rng,
+#     spl::Sampler{<:AnISHMC},
+#     dist::Distribution,
+#     vn::VarName,
+#     vi,
+# )
+#     updategid!(vi, vn, spl)
+#     r = vi[vn]
+#     # acclogp!(vi, logpdf_with_trans(dist, r, istrans(vi, vn)))
+#     # r
+#     return r, Bijectors.logpdf_with_trans(dist, r, istrans(vi, vn))
+# end
 
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Sampler{<:AnISHMC},
-    dist::MultivariateDistribution,
-    vns::AbstractArray{<:VarName},
-    var::AbstractMatrix,
-    vi,
-)
-    @assert length(dist) == size(var, 1)
-    updategid!.(Ref(vi), vns, Ref(spl))
-    r = vi[vns]
-    var .= r
-    return var, sum(logpdf_with_trans(dist, r, istrans(vi, vns[1])))
-end
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Sampler{<:AnISHMC},
-    dists::Union{Distribution, AbstractArray{<:Distribution}},
-    vns::AbstractArray{<:VarName},
-    var::AbstractArray,
-    vi,
-)
-    updategid!.(Ref(vi), vns, Ref(spl))
-    r = reshape(vi[vec(vns)], size(var))
-    var .= r
-    return var, sum(logpdf_with_trans.(dists, r, istrans(vi, vns[1])))
-end
+# function DynamicPPL.dot_assume(
+#     rng,
+#     spl::Sampler{<:AnISHMC},
+#     dist::MultivariateDistribution,
+#     vns::AbstractArray{<:VarName},
+#     var::AbstractMatrix,
+#     vi,
+# )
+#     @assert length(dist) == size(var, 1)
+#     updategid!.(Ref(vi), vns, Ref(spl))
+#     r = vi[vns]
+#     var .= r
+#     return var, sum(Bijectors.logpdf_with_trans(dist, r, istrans(vi, vns[1])))
+# end
+# function DynamicPPL.dot_assume(
+#     rng,
+#     spl::Sampler{<:AnISHMC},
+#     dists::Union{Distribution, AbstractArray{<:Distribution}},
+#     vns::AbstractArray{<:VarName},
+#     var::AbstractArray,
+#     vi,
+# )
+#     updategid!.(Ref(vi), vns, Ref(spl))
+#     r = reshape(vi[vec(vns)], size(var))
+#     var .= r
+#     return var, sum(Bijectors.logpdf_with_trans.(dists, r, istrans(vi, vns[1])))
+# end
 
-function DynamicPPL.observe(
-    spl::Sampler{<:AnISHMC},
-    d::Distribution,
-    value,
-    vi,
-)
-    return DynamicPPL.observe(SampleFromPrior(), d, value, vi)
-end
+# function DynamicPPL.observe(
+#     spl::Sampler{<:AnISHMC},
+#     d::Distribution,
+#     value,
+#     vi,
+# )
+#     return DynamicPPL.observe(SampleFromPrior(), d, value, vi)
+# end
 
-function DynamicPPL.dot_observe(
-    spl::Sampler{<:AnISHMC},
-    ds::Union{Distribution, AbstractArray{<:Distribution}},
-    value::AbstractArray,
-    vi,
-)
-    return DynamicPPL.dot_observe(SampleFromPrior(), ds, value, vi)
-end
+# function DynamicPPL.dot_observe(
+#     spl::Sampler{<:AnISHMC},
+#     ds::Union{Distribution, AbstractArray{<:Distribution}},
+#     value::AbstractArray,
+#     vi,
+# )
+#     return DynamicPPL.dot_observe(SampleFromPrior(), ds, value, vi)
+# end

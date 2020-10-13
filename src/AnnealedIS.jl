@@ -5,9 +5,11 @@ using Distributions
 using AdvancedMH
 using AdvancedHMC; const AHMC = AdvancedHMC
 using ReverseDiff
+using Memoization
 using LinearAlgebra: I
 using StatsFuns: logsumexp
 using Random
+using Bijectors
 
 # Exports
 export AnnealedISSampler,
@@ -182,6 +184,14 @@ function AnISModel(m::Turing.Model)
     )
 end
 
+function AnISModel(m::Turing.Model, vi)
+    return AnISModel(
+        rng -> sample_from_prior(rng, m),
+        make_log_prior_density(m, vi),
+        make_log_joint_density(m, vi)
+    )
+end
+
 struct AnIS{S<:RejectionSampler} <: Turing.InferenceAlgorithm
     betas::Array{Float64}
     transition_kernel_fn::Function
@@ -235,17 +245,24 @@ function AnnealedISSampler(model::Turing.Model, alg::AnIS)
     return AnnealedISSampler(AnISModel(model), alg)
 end
 
+function AnnealedISSampler(model::Turing.Model, alg::AnIS, vi)
+    return AnnealedISSampler(AnISModel(model, vi), alg)
+end
+
 # HMC initialisation.
 
-struct AnISHMC{S<:RejectionSampler} <: Turing.InferenceAlgorithm
+struct AnISHMC{S<:RejectionSampler,P<:AHMC.AbstractProposal} <: Turing.InferenceAlgorithm
     betas::Array{Float64}
-    proposal::AHMC.AbstractProposal
+    proposal::P
     num_samples::Int # Number of samples for single transition kernel
     rejection_sampler::S
 end
 
 Turing.DynamicPPL.getspace(::AnISHMC) = ()
-Turing.Core.getADbackend(alg::AnISHMC) = Turing.Core.ReverseDiffAD{false}()
+# NOTE: ReverseDiff will give wrong results because support for using contexts is broken.
+#Turing.Core.getADbackend(alg::AnISHMC) = Turing.Core.ReverseDiffAD{true}()
+Turing.Core.getADbackend(alg::AnISHMC) = Turing.ForwardDiffAD{1}()
+Turing.Core.getchunksize(::Type{<:AnISHMC}) = 2
 
 struct AnnealedISSamplerHMC{S<:RejectionSampler}
     prior_sampling::Function
@@ -257,15 +274,13 @@ struct AnnealedISSamplerHMC{S<:RejectionSampler}
     alg::AnISHMC{S}
 end
 
-function AnnealedISSamplerHMC(model::Turing.Model, alg::AnISHMC)
-    spl = Sampler(alg, model)
-    vi = spl.state.vi
+function AnnealedISSamplerHMC(model::Turing.Model, alg::AnISHMC, spl)
     prior_sampling = gen_prior_sample(model)
-    logprior = gen_logprior(vi, model, spl)
-    logjoint = gen_logjoint(vi, model, spl)
+    logprior = gen_logprior(spl.state.vi, model, spl)
+    logjoint = gen_logjoint(spl.state.vi, model, spl)
 
-    logprior_grad = gen_logprior_grad(vi, model, spl)
-    logjoint_grad = gen_logjoint_grad(vi, model, spl)
+    logprior_grad = gen_logprior_grad(spl.state.vi, model, spl)
+    logjoint_grad = gen_logjoint_grad(spl.state.vi, model, spl)
 
     hamiltonians = make_hamiltonians(
         alg.betas,
@@ -273,7 +288,7 @@ function AnnealedISSamplerHMC(model::Turing.Model, alg::AnISHMC)
         logjoint, 
         logprior_grad, 
         logjoint_grad,
-        length(vi[spl])
+        length(spl.state.vi[spl])
     )
     return AnnealedISSamplerHMC(
         prior_sampling, 
@@ -385,7 +400,7 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
     # TODO: Possible use an iterator approach from AbstractMCMC to avoid saving 
     # unused samples. NOTE: Requires AbstractMCMC 2
     spl = AdvancedMH.RWMH(sampler.transition_kernels[i-1])
-    num_steps = 5
+    num_steps = 20
     #num_steps = i > 2 ? 20 : 1000
     samples = sample(model, spl, num_steps; progress=false, init_params=x)
 
@@ -420,6 +435,9 @@ function resample(rng, sampler::AnnealedISSamplerHMC{SimpleRejection}, num_rejec
     log_transition = logdensity(sampler, 2, sample)
     if (log_prior == -Inf || log_transition == -Inf)
         # Reject sample.
+        @show sample
+        @show log_prior
+        @show log_transition
         return WeightedSample(-Inf, sample), true, num_rejected+1
     else
         log_weight = log_transition - log_prior
@@ -546,10 +564,14 @@ function ais_sample(rng, sampler, num_samples; store_intermediate_samples=false)
     diagnostics = init_diagnostics(first_diagnostics, num_samples)
 
     # TODO: Parallelize the loop.
-    for i = 2:num_samples
+    spls = [deepcopy(sampler) for _ in 1:Threads.nthreads()]
+    Threads.@threads for i = 2:num_samples
+    #println("Not parallel")
+    #for i = 2:num_samples
+        tid = Threads.threadid()
         samples[i], d = single_sample(
             rng, 
-            sampler; 
+            spls[tid];
             store_intermediate_samples=store_intermediate_samples
         )
         add_diagnostics!(diagnostics, d, i)
@@ -634,5 +656,69 @@ function init_diagnostics(first_diagnostics, num_samples)
 end
 
 include("turing_interop.jl")
+
+####
+#### Compiler interface, i.e. tilde operators.
+####
+#### Taken from https://github.com/TuringLang/Turing.jl/blob/master/src/inference/hmc.jl
+function DynamicPPL.assume(
+    rng,
+    spl::Sampler{<:AnISHMC},
+    dist::Distribution,
+    vn::VarName,
+    vi,
+)
+    updategid!(vi, vn, spl)
+    r = vi[vn]
+    # acclogp!(vi, logpdf_with_trans(dist, r, istrans(vi, vn)))
+    # r
+    return r, Bijectors.logpdf_with_trans(dist, r, istrans(vi, vn))
+end
+
+function DynamicPPL.dot_assume(
+    rng,
+    spl::Sampler{<:AnISHMC},
+    dist::MultivariateDistribution,
+    vns::AbstractArray{<:VarName},
+    var::AbstractMatrix,
+    vi,
+)
+    @assert length(dist) == size(var, 1)
+    updategid!.(Ref(vi), vns, Ref(spl))
+    r = vi[vns]
+    var .= r
+    return var, sum(Bijectors.logpdf_with_trans(dist, r, istrans(vi, vns[1])))
+end
+function DynamicPPL.dot_assume(
+    rng,
+    spl::Sampler{<:AnISHMC},
+    dists::Union{Distribution, AbstractArray{<:Distribution}},
+    vns::AbstractArray{<:VarName},
+    var::AbstractArray,
+    vi,
+)
+    updategid!.(Ref(vi), vns, Ref(spl))
+    r = reshape(vi[vec(vns)], size(var))
+    var .= r
+    return var, sum(Bijectors.logpdf_with_trans.(dists, r, istrans(vi, vns[1])))
+end
+
+function DynamicPPL.observe(
+    spl::Sampler{<:AnISHMC},
+    d::Distribution,
+    value,
+    vi,
+)
+    return DynamicPPL.observe(SampleFromPrior(), d, value, vi)
+end
+
+function DynamicPPL.dot_observe(
+    spl::Sampler{<:AnISHMC},
+    ds::Union{Distribution, AbstractArray{<:Distribution}},
+    value::AbstractArray,
+    vi,
+)
+    return DynamicPPL.dot_observe(SampleFromPrior(), ds, value, vi)
+end
 
 end
