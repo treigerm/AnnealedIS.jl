@@ -446,4 +446,59 @@ end
             @test vals_seq == vals_broadcast
         end
     end
+
+    @testset "AD backends" begin
+        @model function test_model(y)
+            x ~ Normal(0, 1)
+            y ~ Normal(x, 1)
+        end
+
+        yval = 3
+        tm = test_model(yval)
+
+        num_vals = 1 #20
+        test_vals = rand(num_vals)
+        test_vals = [[x] for x in test_vals]
+
+        # Forward mode AD
+        betas = [0.0, 0.5, 1.0]
+        proposal = AdvancedHMC.StaticTrajectory(AdvancedHMC.Leapfrog(0.05), 10)
+        anis_fw = AnISHMC{Turing.ForwardDiffAD{1}}(
+            betas,
+            proposal,
+            10,
+            SimpleRejection()
+        )
+        spl = Turing.DynamicPPL.Sampler(anis_fw, tm)
+        vi = spl.state.vi
+
+        logjoint_grad_fw = AnnealedIS.gen_logjoint_grad(vi, tm, spl)
+        logprior_grad_fw = AnnealedIS.gen_logprior_grad(vi, tm, spl)
+
+        joint_grads_fw = logjoint_grad_fw.(test_vals)
+        prior_grads_fw = logprior_grad_fw.(test_vals)
+
+        # ReverseDiff AD
+        anis_rv = AnISHMC{Turing.Core.ReverseDiffAD{false}}(
+            betas,
+            proposal,
+            10,
+            SimpleRejection()
+        )
+        spl = Turing.DynamicPPL.Sampler(anis_rv, tm)
+        vi = spl.state.vi
+
+        logjoint_grad_rv = AnnealedIS.gen_logjoint_grad(vi, tm, spl)
+        logprior_grad_rv = AnnealedIS.gen_logprior_grad(vi, tm, spl)
+
+        joint_grads_rv = logjoint_grad_rv.(test_vals)
+        prior_grads_rv = logprior_grad_rv.(test_vals)
+
+        @test joint_grads_fw == joint_grads_rv
+        @test prior_grads_fw == prior_grads_rv
+
+        # Some sanity check that the joint and prior are different
+        @test prior_grads_rv != joint_grads_rv
+        @test prior_grads_fw != joint_grads_fw
+    end
 end

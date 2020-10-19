@@ -251,27 +251,39 @@ end
 
 # HMC initialisation.
 
-struct AnISHMC{S<:RejectionSampler,P<:AHMC.AbstractProposal} <: Turing.InferenceAlgorithm
+struct AnISHMC{AD,S<:RejectionSampler,P<:AHMC.AbstractProposal} <: Turing.Hamiltonian{AD}
     betas::Array{Float64}
     proposal::P
     num_samples::Int # Number of samples for single transition kernel
     rejection_sampler::S
 end
 
+# Set ForwardDiffAD as default AD
+AnISHMC(args...; kwargs...) = AnISHMC{Turing.Core.ForwardDiffAD{1}}(args...; kwargs...)
+function AnISHMC{AD}(
+    betas, 
+    proposal::P, 
+    num_samples, 
+    rejection_sampler::S
+) where {AD, S<:RejectionSampler, P<:AHMC.AbstractProposal}
+    return AnISHMC{AD,S,P}(betas, proposal, num_samples, rejection_sampler)
+end
+
 Turing.DynamicPPL.getspace(::AnISHMC) = ()
 # NOTE: ReverseDiff will give wrong results because support for using contexts is broken.
 #Turing.Core.getADbackend(alg::AnISHMC) = Turing.Core.ReverseDiffAD{true}()
-Turing.Core.getADbackend(alg::AnISHMC) = Turing.ForwardDiffAD{1}()
-Turing.Core.getchunksize(::Type{<:AnISHMC}) = 2
+#Turing.Core.getADbackend(alg::AnISHMC) = Turing.ForwardDiffAD{1}()
+Turing.Core.getADbackend(alg::AnISHMC{AD,S,P}) where {AD,S,P} = AD()
+Turing.Core.getchunksize(::Type{<:AnISHMC{AD,S,P}}) where {AD,S,P} = Turing.Core.getchunksize(AD)
 
-struct AnnealedISSamplerHMC{S<:RejectionSampler}
+struct AnnealedISSamplerHMC{AD,S<:RejectionSampler,P<:AHMC.AbstractProposal}
     prior_sampling::Function
     prior_density::Function
     joint_density::Function
     prior_grad::Function
     joint_grad::Function
     hamiltonians::Array{AHMC.Hamiltonian,1}
-    alg::AnISHMC{S}
+    alg::AnISHMC{AD,S,P}
 end
 
 function AnnealedISSamplerHMC(model::Turing.Model, alg::AnISHMC, spl)
@@ -429,7 +441,11 @@ function resample(rng, sampler::AnnealedISSampler{SimpleRejection}, num_rejected
     end
 end
 
-function resample(rng, sampler::AnnealedISSamplerHMC{SimpleRejection}, num_rejected)
+function resample(
+    rng, 
+    sampler::AnnealedISSamplerHMC{AD,SimpleRejection,P}, 
+    num_rejected
+) where {AD,P<:AHMC.AbstractProposal}
     sample = sampler.prior_sampling()
     log_prior = logdensity(sampler, 1, sample)
     log_transition = logdensity(sampler, 2, sample)
