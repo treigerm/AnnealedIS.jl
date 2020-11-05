@@ -323,6 +323,7 @@ function make_hamiltonians(
 )
     hamiltonians = Array{AHMC.Hamiltonian,1}(undef,length(betas)-1)
     # We don't need a hamiltonian for the first beta (=0).
+    # TODO: We also don't need a hamiltonian for the last betas (=1).
     for (i, b) in enumerate(betas[2:end])
         density(x) = (1 - b) * logprior(x) + b * logjoint(x)
         density_grad(x) = (1 - b) .* logprior_grad(x) .+ b .* logjoint_grad(x)
@@ -424,8 +425,10 @@ function transition_kernel(rng, sampler::AnnealedISSamplerHMC, i, x)
     hamiltonian = sampler.hamiltonians[i-1]
     proposal = sampler.alg.proposal
 
-    samples, _ = sample(hamiltonian, proposal, x, sampler.alg.num_samples; verbose=false)
-    return samples[end]
+    samples, stats = sample(
+        hamiltonian, proposal, x, sampler.alg.num_samples; verbose=false)
+    average_acceptance_rate = mean(map(s -> s.acceptance_rate, stats))
+    return samples[end], average_acceptance_rate
 end
 
 function resample(rng, sampler::AnnealedISSampler{SimpleRejection}, num_rejected)
@@ -491,6 +494,7 @@ function single_sample(
 
     if store_intermediate_samples
         # FIXME: Number of annealing distributions has to be multiple of 10.
+        # NOTE: We store the first 10 annealing samples and after that every 10th.
         diagnostics[:intermediate_samples] = Array{typeof(sample)}(
             undef, 
             Int(num_samples/10)+9
@@ -538,6 +542,7 @@ function single_sample(
 
     if store_intermediate_samples
         # FIXME: Number of annealing distributions has to be multiple of 10.
+        # NOTE: We store the first 10 annealing samples and after that every 10th.
         diagnostics[:intermediate_samples] = Array{typeof(sample)}(
             undef, 
             Int(num_samples/10)+9
@@ -546,23 +551,33 @@ function single_sample(
             undef, 
             Int(num_samples/10)+9
         )
+        diagnostics[:intermediate_acceptance_rate] = Array{Float64}(
+            undef, 
+            Int(num_samples/10)+9
+        )
         diagnostics[:intermediate_samples][1] = sample
         diagnostics[:intermediate_log_weights][1] = log_weight
+        # TODO: If we use rejection sampling in first step it might not be 1.0.
+        diagnostics[:intermediate_acceptance_rate][1] = 1.0
     end
     if early_return
         return weighted_sample, diagnostics
     end
 
-
+    acceptance_rates = Array{Float64}(undef, num_samples-1)
     for i in 2:num_samples
-        sample = transition_kernel(rng, sampler, i, sample)
+        sample, acceptance_rate = transition_kernel(rng, sampler, i, sample)
+        acceptance_rates[i-1] = acceptance_rate
+
         log_weight += logdensity_ratio(sampler, i, sample)
         if store_intermediate_samples && (i % 10 == 0 || i < 10)
             ix = i < 10 ? i : Int(i / 10) + 9
             diagnostics[:intermediate_samples][ix] = sample
             diagnostics[:intermediate_log_weights][ix] = log_weight
+            diagnostics[:intermediate_acceptance_rate][ix] = acceptance_rate
         end
     end
+    diagnostics[:acceptance_rate] = mean(acceptance_rates)
 
     ws = WeightedSample(log_weight, sample)
     return ws, diagnostics

@@ -239,6 +239,8 @@ end
         inter_samples = permutedims(inter_samples, [2, 1])
         @test size(inter_samples) == (num_samples, 11)
         @test map(x->x.params, samples) == inter_samples[:,end]
+
+        @test haskey(diagnostics, :intermediate_log_weights)
     end
 
     @testset "Resampling Tests" begin
@@ -313,7 +315,7 @@ end
 
     @testset "AnnealedISSamplerHMC" begin
         N = 100
-        num_samples = 1000
+        num_samples = 10
 
         @model function test_model(y)
             x ~ Normal(0, 1)
@@ -349,10 +351,17 @@ end
             @test isapprox(dr, hdr, atol=1e-12)
         end
 
-        #@time begin
-        #chain = sample(Random.GLOBAL_RNG, test_model(yval), anis, num_samples)
-        #end
-        #@test chain.info[:ess] > 900
+        chain = sample(
+            Random.GLOBAL_RNG, 
+            test_model(yval), 
+            anis, 
+            num_samples;
+            store_intermediate_samples=true
+        )
+
+        acceptance_rates = chain.info[:intermediate_acceptance_rate]
+        @test haskey(chain.info, :intermediate_acceptance_rate)
+        @test haskey(chain.info, :acceptance_rate)
 
         #samples = Array(chain[:x])[:,1]
         #log_weights = Array(chain[:log_weight])[:,1]
@@ -400,7 +409,7 @@ end
 
         betas = [0.0, 0.5, 1.0]
         proposal = AdvancedHMC.StaticTrajectory(AdvancedHMC.Leapfrog(0.05), 10)
-        anis = AnISHMC(
+        anis = AnISHMC{Turing.Core.ReverseDiffAD{false}}(
             betas,
             proposal,
             10,
@@ -426,7 +435,6 @@ end
         test_vals = rand(num_vals)
         test_vals = [[x] for x in test_vals]
 
-        spl = Turing.SampleFromPrior()
         vi = Turing.VarInfo(tm)
         logjoint = AnnealedIS.gen_logjoint(vi, tm, spl)
         logjoint_grad = AnnealedIS.gen_logjoint_grad(vi, tm, spl)
@@ -456,7 +464,7 @@ end
         yval = 3
         tm = test_model(yval)
 
-        num_vals = 1 #20
+        num_vals = 20
         test_vals = rand(num_vals)
         test_vals = [[x] for x in test_vals]
 

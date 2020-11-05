@@ -210,6 +210,10 @@ function to_mcmcchains(samples, diagnostics)
         info[:intermediate_samples] = diagnostics[:intermediate_samples]
         info[:intermediate_log_weights] = diagnostics[:intermediate_log_weights]
     end
+    if haskey(diagnostics, :intermediate_acceptance_rate)
+        info[:intermediate_acceptance_rate] = diagnostics[:intermediate_acceptance_rate]
+        info[:acceptance_rate] = diagnostics[:acceptance_rate]
+    end
     info = (;info...)
 
     # Conretize the array before giving it to MCMCChains.
