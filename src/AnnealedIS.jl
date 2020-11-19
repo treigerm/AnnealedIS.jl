@@ -251,9 +251,10 @@ end
 
 # HMC initialisation.
 
-struct AnISHMC{AD,S<:RejectionSampler,P<:AHMC.AbstractProposal} <: Turing.Hamiltonian{AD}
+struct AnISHMC{AD,S<:RejectionSampler,P<:AHMC.AbstractProposal,M<:AHMC.AbstractMetric} <: Turing.Hamiltonian{AD}
     betas::Array{Float64}
     proposal::P
+    metric::M
     num_samples::Int # Number of samples for single transition kernel
     rejection_sampler::S
 end
@@ -266,24 +267,42 @@ function AnISHMC{AD}(
     num_samples, 
     rejection_sampler::S
 ) where {AD, S<:RejectionSampler, P<:AHMC.AbstractProposal}
-    return AnISHMC{AD,S,P}(betas, proposal, num_samples, rejection_sampler)
+    # NOTE: For the unit euclidean metric AdvancedHMC.jl will automatically 
+    #       resize the metric to the appropriate dimension so we choose dim=1 as 
+    #       a default here.
+    metric = AHMC.UnitEuclideanMetric(1)
+    M = typeof(metric)
+    return AnISHMC{AD,S,P,M}(
+        betas, proposal, metric, num_samples, rejection_sampler
+    )
+end
+function AnISHMC{AD}(
+    betas, 
+    proposal::P, 
+    metric::M,
+    num_samples, 
+    rejection_sampler::S
+) where {AD, S<:RejectionSampler, P<:AHMC.AbstractProposal,M<:AHMC.AbstractMetric}
+    return AnISHMC{AD,S,P,M}(
+        betas, proposal, metric, num_samples, rejection_sampleri
+    )
 end
 
 Turing.DynamicPPL.getspace(::AnISHMC) = ()
 # NOTE: ReverseDiff will give wrong results because support for using contexts is broken.
 #Turing.Core.getADbackend(alg::AnISHMC) = Turing.Core.ReverseDiffAD{true}()
 #Turing.Core.getADbackend(alg::AnISHMC) = Turing.ForwardDiffAD{1}()
-Turing.Core.getADbackend(alg::AnISHMC{AD,S,P}) where {AD,S,P} = AD()
-Turing.Core.getchunksize(::Type{<:AnISHMC{AD,S,P}}) where {AD,S,P} = Turing.Core.getchunksize(AD)
+Turing.Core.getADbackend(alg::AnISHMC{AD,S,P,M}) where {AD,S,P,M} = AD()
+Turing.Core.getchunksize(::Type{<:AnISHMC{AD,S,P,M}}) where {AD,S,P,M} = Turing.Core.getchunksize(AD)
 
-struct AnnealedISSamplerHMC{AD,S<:RejectionSampler,P<:AHMC.AbstractProposal}
+struct AnnealedISSamplerHMC{AD,S<:RejectionSampler,P<:AHMC.AbstractProposal,M<:AHMC.AbstractMetric}
     prior_sampling::Function
     prior_density::Function
     joint_density::Function
     prior_grad::Function
     joint_grad::Function
     hamiltonians::Array{AHMC.Hamiltonian,1}
-    alg::AnISHMC{AD,S,P}
+    alg::AnISHMC{AD,S,P,M}
 end
 
 function AnnealedISSamplerHMC(model::Turing.Model, alg::AnISHMC, spl)
@@ -300,7 +319,7 @@ function AnnealedISSamplerHMC(model::Turing.Model, alg::AnISHMC, spl)
         logjoint, 
         logprior_grad, 
         logjoint_grad,
-        length(spl.state.vi[spl])
+        alg.metric #length(spl.state.vi[spl])
     )
     return AnnealedISSamplerHMC(
         prior_sampling, 
@@ -319,7 +338,7 @@ function make_hamiltonians(
     logjoint,
     logprior_grad,
     logjoint_grad,
-    dim
+    metric
 )
     hamiltonians = Array{AHMC.Hamiltonian,1}(undef,length(betas)-1)
     # We don't need a hamiltonian for the first beta (=0).
@@ -328,7 +347,7 @@ function make_hamiltonians(
         density(x) = (1 - b) * logprior(x) + b * logjoint(x)
         density_grad(x) = (1 - b) .* logprior_grad(x) .+ b .* logjoint_grad(x)
 
-        metric = AHMC.UnitEuclideanMetric(dim)
+        #metric = AHMC.UnitEuclideanMetric(dim)
         hamiltonians[i] = AHMC.Hamiltonian(metric, density, density_grad)
     end
 
