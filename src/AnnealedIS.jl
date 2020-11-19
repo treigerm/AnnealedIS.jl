@@ -284,7 +284,7 @@ function AnISHMC{AD}(
     rejection_sampler::S
 ) where {AD, S<:RejectionSampler, P<:AHMC.AbstractProposal,M<:AHMC.AbstractMetric}
     return AnISHMC{AD,S,P,M}(
-        betas, proposal, metric, num_samples, rejection_sampleri
+        betas, proposal, metric, num_samples, rejection_sampler
     )
 end
 
