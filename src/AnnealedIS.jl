@@ -5,6 +5,7 @@ using Distributions
 using AdvancedMH
 using AdvancedHMC; const AHMC = AdvancedHMC
 using ReverseDiff
+using ProgressMeter
 using Memoization
 using LinearAlgebra: I
 using StatsFuns: logsumexp
@@ -252,9 +253,9 @@ end
 # HMC initialisation.
 
 struct AnISHMC{AD,S<:RejectionSampler,P<:AHMC.AbstractProposal,M<:AHMC.AbstractMetric} <: Turing.Hamiltonian{AD}
-    betas::Array{Float64}
-    proposal::P
-    metric::M
+    betas::Array{Float64} # Length N, betas[1] = 0, betas[N] = 1
+    proposals::Array{P} # Length N-1
+    metrics::Array{M} # Length N-1
     num_samples::Int # Number of samples for single transition kernel
     rejection_sampler::S
 end
@@ -272,7 +273,7 @@ function AnISHMC{AD}(
     #       a default here.
     metric = AHMC.UnitEuclideanMetric(1)
     M = typeof(metric)
-    return AnISHMC{AD,S,P,M}(
+    return AnISHMC{AD}(
         betas, proposal, metric, num_samples, rejection_sampler
     )
 end
@@ -283,8 +284,22 @@ function AnISHMC{AD}(
     num_samples, 
     rejection_sampler::S
 ) where {AD, S<:RejectionSampler, P<:AHMC.AbstractProposal,M<:AHMC.AbstractMetric}
+    num_betas = size(betas, 1)
+    proposals = repeat([proposal], num_betas - 1)
+    metrics = repeat([metric], num_betas - 1)
     return AnISHMC{AD,S,P,M}(
-        betas, proposal, metric, num_samples, rejection_sampler
+        betas, proposals, metrics, num_samples, rejection_sampler
+    )
+end
+function AnISHMC{AD}(
+    betas, 
+    proposals::Array{P,1}, 
+    metrics::Array{M,1},
+    num_samples, 
+    rejection_sampler::S
+) where {AD, S<:RejectionSampler, P<:AHMC.AbstractProposal,M<:AHMC.AbstractMetric}
+    return AnISHMC{AD,S,P,M}(
+        betas, proposals, metrics, num_samples, rejection_sampler
     )
 end
 
@@ -319,7 +334,7 @@ function AnnealedISSamplerHMC(model::Turing.Model, alg::AnISHMC, spl)
         logjoint, 
         logprior_grad, 
         logjoint_grad,
-        alg.metric #length(spl.state.vi[spl])
+        alg.metrics #length(spl.state.vi[spl])
     )
     return AnnealedISSamplerHMC(
         prior_sampling, 
@@ -338,9 +353,9 @@ function make_hamiltonians(
     logjoint,
     logprior_grad,
     logjoint_grad,
-    metric
+    metrics
 )
-    hamiltonians = Array{AHMC.Hamiltonian,1}(undef,length(betas)-1)
+    hamiltonians = Array{AHMC.Hamiltonian,1}(undef, length(betas)-1)
     # We don't need a hamiltonian for the first beta (=0).
     # TODO: We also don't need a hamiltonian for the last betas (=1).
     for (i, b) in enumerate(betas[2:end])
@@ -348,7 +363,7 @@ function make_hamiltonians(
         density_grad(x) = (1 - b) .* logprior_grad(x) .+ b .* logjoint_grad(x)
 
         #metric = AHMC.UnitEuclideanMetric(dim)
-        hamiltonians[i] = AHMC.Hamiltonian(metric, density, density_grad)
+        hamiltonians[i] = AHMC.Hamiltonian(metrics[i], density, density_grad)
     end
 
     return hamiltonians
@@ -440,9 +455,8 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
 end
 
 function transition_kernel(rng, sampler::AnnealedISSamplerHMC, i, x)
-
     hamiltonian = sampler.hamiltonians[i-1]
-    proposal = sampler.alg.proposal
+    proposal = sampler.alg.proposals[i-1]
 
     samples, stats = sample(
         hamiltonian, proposal, x, sampler.alg.num_samples; verbose=false)
@@ -602,7 +616,13 @@ function single_sample(
     return ws, diagnostics
 end
 
-function ais_sample(rng, sampler, num_samples; store_intermediate_samples=false)
+function ais_sample(
+    rng, 
+    sampler, 
+    num_samples; 
+    store_intermediate_samples=false,
+    progress=false
+)
     first_sample, first_diagnostics = single_sample(
         rng, 
         sampler;
@@ -613,11 +633,11 @@ function ais_sample(rng, sampler, num_samples; store_intermediate_samples=false)
     
     diagnostics = init_diagnostics(first_diagnostics, num_samples)
 
-    # TODO: Parallelize the loop.
+    if progress
+        pmeter = Progress(num_samples)
+    end
     spls = [deepcopy(sampler) for _ in 1:Threads.nthreads()]
     Threads.@threads for i = 2:num_samples
-    #println("Not parallel")
-    #for i = 2:num_samples
         tid = Threads.threadid()
         samples[i], d = single_sample(
             rng, 
@@ -625,6 +645,9 @@ function ais_sample(rng, sampler, num_samples; store_intermediate_samples=false)
             store_intermediate_samples=store_intermediate_samples
         )
         add_diagnostics!(diagnostics, d, i)
+        if progress
+            next!(pmeter)
+        end
     end
 
     diagnostics[:ess] = effective_sample_size(samples)
