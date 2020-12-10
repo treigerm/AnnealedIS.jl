@@ -487,9 +487,6 @@ function resample(
     log_transition = logdensity(sampler, 2, sample)
     if (log_prior == -Inf || log_transition == -Inf)
         # Reject sample.
-        @show sample
-        @show log_prior
-        @show log_transition
         return WeightedSample(-Inf, sample), true, num_rejected+1
     else
         log_weight = log_transition - log_prior
