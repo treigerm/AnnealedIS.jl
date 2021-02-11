@@ -447,7 +447,8 @@ function transition_kernel(rng, sampler::AnnealedISSampler, i, x)
     # TODO: Possible use an iterator approach from AbstractMCMC to avoid saving 
     # unused samples. NOTE: Requires AbstractMCMC 2
     spl = AdvancedMH.RWMH(sampler.transition_kernels[i-1])
-    num_steps = 20
+    #num_steps = 20
+    num_steps = 5
     #num_steps = i > 2 ? 20 : 1000
     samples = sample(model, spl, num_steps; progress=false, init_params=x)
 
@@ -710,6 +711,13 @@ AdvancedMH.RWMH(nt::NamedTuple) = MetropolisHastings(map(x -> RandomWalkProposal
 
 function add_diagnostics!(diagnostics, d, i)
     for k in keys(d)
+        if !haskey(diagnostics, k)
+            # Not all keys are initialized because some samples might have been 
+            # rejected.
+            first_k = iterate(keys(diagnostics))[1]
+            diagnostics[k] = Array{typeof(d[k])}(
+                undef, size(diagnostics[first_k], 1))
+        end
         diagnostics[k][i] = d[k]
     end
 end
