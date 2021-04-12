@@ -19,6 +19,11 @@ Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 
 [compat]
 ReverseDiff = "1.7"
+Coverage = "1.2"
+Distributions = "0.24"
+Bijectors = "0.9"
+AdvancedHMC = "0.2"
+AdvancedMH = "0.5"
 Turing = "^0.14.10"
 julia = "1"
 
